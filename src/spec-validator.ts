@@ -69,9 +69,64 @@ export interface ValidationResult {
   violatedSkill?: string;
 }
 
+function isMigrationFile(filePath: string): boolean {
+  const lower = filePath.toLowerCase();
+  return (
+    /drizzle\/.*\.sql$/i.test(lower) ||
+    /migrations\/.*\.sql$/i.test(lower) ||
+    /drizzle\/\d/i.test(lower) ||
+    /db\/migrations/i.test(lower) ||
+    (lower.endsWith(".sql") && (lower.includes("drizzle") || lower.includes("migration")))
+  );
+}
+
+function isSplitTypeFile(filePath: string): boolean {
+  return /shared\/(types|models|interfaces)\/\w+\.ts$/i.test(filePath);
+}
+
 export function validateSpec(spec: any): ValidationResult {
   const rules = loadSkillRules();
   const filePath = spec.filePath || "";
+
+  if (isMigrationFile(filePath)) {
+    const corrected = {
+      ...spec,
+      filePath: "shared/schema.ts",
+      action: "modify",
+      description: `${spec.description || "Add schema changes"} (auto-corrected from migration file ${filePath}). After modifying schema, run: npx drizzle-kit push`,
+      testCommand: "npx drizzle-kit push && echo 'Schema push successful'",
+      shellCommands: [{ command: "npx drizzle-kit push", description: "Sync schema to database", required: true }],
+      _autoCorrected: true,
+      _originalFilePath: filePath,
+      _correctionReason: "Migration SQL files must be auto-generated via drizzle-kit, not created manually. Redirected to shared/schema.ts.",
+    };
+    return {
+      valid: false,
+      action: "redirect",
+      reason: `Migration file "${filePath}" cannot be created directly — redirected to shared/schema.ts + drizzle-kit push`,
+      correctedSpec: corrected,
+      violatedSkill: "drizzle-migrations",
+    };
+  }
+
+  if (isSplitTypeFile(filePath)) {
+    const corrected = {
+      ...spec,
+      filePath: "shared/schema.ts",
+      action: "modify",
+      description: `${spec.description || "Add types"} (auto-corrected from split type file ${filePath}). Types should be inferred from Drizzle schema using $inferSelect/$inferInsert.`,
+      _autoCorrected: true,
+      _originalFilePath: filePath,
+      _correctionReason: "Project uses single shared/schema.ts — not split type files. Types are inferred from Drizzle schema.",
+    };
+    return {
+      valid: false,
+      action: "redirect",
+      reason: `Split type file "${filePath}" not allowed — redirected to shared/schema.ts`,
+      correctedSpec: corrected,
+      violatedSkill: "single-schema",
+    };
+  }
 
   for (const rule of rules) {
     for (const pattern of rule.neverPatterns) {
