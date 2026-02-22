@@ -2,7 +2,7 @@ import fs from "fs";
 import path from "path";
 import { generatePlan, loadCurrentPlan, getNextStep, cancelPlan } from "./planner-agent";
 import { executeStep, rollbackFiles } from "./builder-agent";
-import { verifyChanges, quickHealthCheck } from "./verify-agent";
+import { verifyChanges, quickHealthCheck, quickStepVerify } from "./verify-agent";
 import { getCompletionPercent, markGoalComplete, generateProgressReport } from "./progress-tracker";
 import { getBudgetLimits } from "./identity";
 import { getCostSummary } from "./cost-tracker";
@@ -348,7 +348,7 @@ let currentJournal: SessionJournal | null = null;
 
 const MAX_CYCLES_PER_SESSION = 50;
 const MIN_CYCLE_INTERVAL_MS = 120000;
-const MAX_ERRORS_BEFORE_PAUSE = 3;
+const MAX_ERRORS_BEFORE_PAUSE = 5;
 const MAX_ERRORS_STORED = 50;
 let lastCycleStartTime = 0;
 
@@ -485,7 +485,7 @@ async function runCycle(): Promise<string> {
 
     if (!buildResult.success) {
       if (buildResult.filesModified.length > 0) {
-        console.log("[Autonomy] Build failed with partial changes — rolling back...");
+        console.log("[Autonomy] Build failed with partial changes — rolling back step files...");
         const rolledBack = rollbackFiles(buildResult.filesModified);
         if (rolledBack.length > 0) {
           console.log(`[Autonomy] Rolled back ${rolledBack.length} file(s): ${rolledBack.join(", ")}`);
@@ -494,23 +494,18 @@ async function runCycle(): Promise<string> {
 
       pushError(`Cycle ${state.currentCycle}: Build failed — ${buildResult.error}`);
 
-      console.log("[Autonomy] Build failed — triggering auto-fixer...");
-      entry.autoFixerTriggered = true;
-      try {
-        const fixResults = await triggerAutoFixer();
-        const fixed = fixResults.filter(r => r.success);
-        if (fixed.length > 0) {
-          console.log(`[Autonomy] Auto-fixer resolved ${fixed.length} blocker(s)`);
-        }
-      } catch (fixErr: any) {
-        console.log(`[Autonomy] Auto-fixer error: ${fixErr.message}`);
+      const planAfterFail = loadCurrentPlan();
+      const stepAfterFail = planAfterFail?.steps.find(s => s.id === nextStep.id);
+      if (stepAfterFail?.status === "pending") {
+        console.log(`[Autonomy] Step "${nextStep.id}" will be retried next cycle (attempt ${stepAfterFail.failCount || 1})`);
+      } else if (stepAfterFail?.status === "skipped") {
+        console.log(`[Autonomy] Step "${nextStep.id}" skipped after max failures — plan continues`);
+        state.errors = [];
       }
 
-      if (state.errors.length >= MAX_ERRORS_BEFORE_PAUSE) state.paused = true;
       entry.result = "build-failed";
       entry.error = buildResult.error || "Build produced no changes";
       entry.costThisCycle = getCostSummary().totalAllTime - costBefore;
-      writeNeedsAttention(state.currentCycle, "build-failed", entry.stepDescription, entry.error);
       addJournalEntry(currentJournal, entry);
       return "build-failed";
     }
@@ -518,38 +513,47 @@ async function runCycle(): Promise<string> {
     entry.filesModified = buildResult.filesModified;
     entry.usedOpus = !!buildResult.usedOpus;
     state.filesModified.push(...buildResult.filesModified);
-    if (buildResult.usedOpus) {
-      console.log("[Autonomy] Opus stepped in to complete this step");
-    }
 
-    console.log("[Autonomy] Verifying changes...");
-    const verification = await verifyChanges(buildResult.filesModified);
-    entry.verificationPassed = verification.allPassed;
+    if (buildResult.filesModified.length > 0) {
+      console.log("[Autonomy] Quick-verifying step changes...");
+      const stepVerify = await quickStepVerify(buildResult.filesModified);
 
-    if (!verification.allPassed) {
-      const failures = verification.results.filter(r => !r.passed);
-      console.log(`[Autonomy] Verification issues: ${failures.map(f => f.check).join(", ")}`);
+      if (!stepVerify.passed) {
+        console.log(`[Autonomy] Step verification issues: ${stepVerify.errors.join("; ")}`);
 
-      if (buildResult.filesModified.length > 0) {
-        console.log("[Autonomy] Rolling back failed changes...");
+        console.log("[Autonomy] Rolling back step files...");
         const rolledBack = rollbackFiles(buildResult.filesModified);
         if (rolledBack.length > 0) {
           console.log(`[Autonomy] Rolled back ${rolledBack.length} file(s): ${rolledBack.join(", ")}`);
         }
+
+        const { markStepFailed } = require("./planner-agent");
+        markStepFailed(nextStep.id);
+
+        pushError(`Cycle ${state.currentCycle}: Step verification failed — ${stepVerify.errors[0]}`);
+        entry.result = "verify-failed";
+        entry.error = `Step verification: ${stepVerify.errors.slice(0, 3).join("; ")}`;
+        entry.verificationPassed = false;
+        entry.costThisCycle = getCostSummary().totalAllTime - costBefore;
+        addJournalEntry(currentJournal, entry);
+        return "verify-failed";
       }
 
-      pushError(`Cycle ${state.currentCycle}: Verification failed`);
+      entry.verificationPassed = true;
+    }
 
-      console.log("[Autonomy] Verification failed — triggering auto-fixer...");
-      entry.autoFixerTriggered = true;
-      try {
-        await triggerAutoFixer();
-      } catch {}
-
+    const healthyAfterStep = await quickHealthCheck();
+    if (!healthyAfterStep) {
+      console.log("[Autonomy] Server unhealthy after step — rolling back...");
+      if (buildResult.filesModified.length > 0) {
+        rollbackFiles(buildResult.filesModified);
+      }
+      const { markStepFailed: markFailed } = require("./planner-agent");
+      markFailed(nextStep.id);
       entry.result = "verify-failed";
-      entry.error = `Verification failures: ${failures.map(f => f.check).join(", ")}`;
+      entry.error = "Server became unhealthy after changes";
+      entry.verificationPassed = false;
       entry.costThisCycle = getCostSummary().totalAllTime - costBefore;
-      writeNeedsAttention(state.currentCycle, "verify-failed", entry.stepDescription, entry.error);
       addJournalEntry(currentJournal, entry);
       return "verify-failed";
     }

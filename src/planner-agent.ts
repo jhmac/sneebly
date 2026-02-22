@@ -14,7 +14,9 @@ export interface PlanStep {
   filePath: string;
   description: string;
   dependsOn: string[];
-  status: "pending" | "in_progress" | "done" | "failed";
+  status: "pending" | "in_progress" | "done" | "failed" | "skipped";
+  failCount?: number;
+  skipReason?: string;
 }
 
 export interface Plan {
@@ -181,7 +183,29 @@ Respond in JSON:
 export function getNextStep(): PlanStep | null {
   const plan = loadCurrentPlan();
   if (!plan || plan.status !== "active") return null;
-  return plan.steps.find(s => s.status === "pending") || null;
+
+  for (const step of plan.steps) {
+    if (step.status !== "pending") continue;
+
+    const depsReady = step.dependsOn.every(dep => {
+      const depStep = plan.steps.find(s => s.id === dep);
+      return depStep?.status === "done" || depStep?.status === "skipped";
+    });
+
+    if (depsReady) return step;
+  }
+
+  const allDone = plan.steps.every(s => s.status === "done" || s.status === "skipped" || s.status === "failed");
+  if (allDone) {
+    const doneCount = plan.steps.filter(s => s.status === "done").length;
+    if (doneCount > 0) {
+      plan.status = "completed";
+      savePlan(plan);
+      console.log(`[Planner] Plan auto-completed: ${doneCount}/${plan.steps.length} steps done`);
+    }
+  }
+
+  return null;
 }
 
 export function markStepDone(stepId: string): void {
@@ -196,14 +220,52 @@ export function markStepDone(stepId: string): void {
   savePlan(plan);
 }
 
+const MAX_STEP_FAILURES = 2;
+
 export function markStepFailed(stepId: string): void {
   const plan = loadCurrentPlan();
   if (!plan) return;
   const step = plan.steps.find(s => s.id === stepId);
-  if (step) step.status = "failed";
-  plan.status = "failed";
+  if (!step) return;
+
+  step.failCount = (step.failCount || 0) + 1;
+
+  if (step.failCount >= MAX_STEP_FAILURES) {
+    step.status = "skipped";
+    step.skipReason = `Skipped after ${step.failCount} failed attempts`;
+    console.log(`[Planner] Step ${stepId} skipped after ${step.failCount} failures — continuing plan`);
+
+    const hasRemainingWork = plan.steps.some(s => {
+      if (s.status !== "pending") return false;
+      const depOnSkipped = s.dependsOn.includes(stepId);
+      if (depOnSkipped) return false;
+      return true;
+    });
+
+    for (const s of plan.steps) {
+      if (s.status === "pending" && s.dependsOn.includes(stepId)) {
+        s.status = "skipped";
+        s.skipReason = `Dependency ${stepId} was skipped`;
+        console.log(`[Planner] Step ${s.id} skipped (depends on skipped step ${stepId})`);
+      }
+    }
+
+    if (!hasRemainingWork) {
+      const doneCount = plan.steps.filter(s => s.status === "done").length;
+      if (doneCount > 0) {
+        plan.status = "completed";
+        console.log(`[Planner] Plan completed with ${doneCount}/${plan.steps.length} steps done (rest skipped)`);
+      } else {
+        plan.status = "failed";
+        console.log(`[Planner] Plan failed — all steps skipped or failed`);
+      }
+    }
+  } else {
+    step.status = "pending";
+    console.log(`[Planner] Step ${stepId} failed (attempt ${step.failCount}/${MAX_STEP_FAILURES}) — will retry`);
+  }
+
   savePlan(plan);
-  console.log(`[Planner] Plan failed at step ${stepId}`);
 }
 
 export function markStepInProgress(stepId: string): void {

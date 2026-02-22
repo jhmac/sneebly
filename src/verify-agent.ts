@@ -308,6 +308,33 @@ export async function verifyChanges(filesModified: string[]): Promise<Verificati
   return report;
 }
 
+export async function quickStepVerify(filesModified: string[]): Promise<{ passed: boolean; errors: string[] }> {
+  const errors: string[] = [];
+
+  for (const file of filesModified) {
+    if (!fs.existsSync(path.resolve(process.cwd(), file))) {
+      errors.push(`Missing file: ${file}`);
+      continue;
+    }
+    if (file.endsWith(".ts") || file.endsWith(".tsx")) {
+      const syntaxResult = checkFileSyntax(file);
+      if (!syntaxResult.passed) {
+        errors.push(`Syntax error in ${file}: ${syntaxResult.details}`);
+      }
+    }
+  }
+
+  const tsFiles = filesModified.filter(f => f.endsWith(".ts") || f.endsWith(".tsx"));
+  if (tsFiles.length > 0) {
+    const tsResult = await checkTypeScript(tsFiles);
+    if (!tsResult.passed) {
+      errors.push(tsResult.details);
+    }
+  }
+
+  return { passed: errors.length === 0, errors };
+}
+
 export async function quickHealthCheck(): Promise<boolean> {
   try {
     const result = await checkServerHealth();

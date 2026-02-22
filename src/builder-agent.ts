@@ -222,6 +222,57 @@ function applyChanges(buildOutput: any): string[] {
   return modified;
 }
 
+async function quickTscCheck(filePaths: string[]): Promise<{ passed: boolean; errors: string }> {
+  const tsFiles = filePaths.filter(f => f.endsWith(".ts") || f.endsWith(".tsx"));
+  if (tsFiles.length === 0) return { passed: true, errors: "" };
+
+  return new Promise((resolve) => {
+    const { exec: execCmd } = require("child_process");
+    execCmd("npx tsc --noEmit --pretty false", { cwd: process.cwd(), timeout: 45000, maxBuffer: 1024 * 1024 }, (error: any, stdout: string, stderr: string) => {
+      const output = ((stdout || "") + (stderr || "")).trim();
+      if (!error || !output) {
+        resolve({ passed: true, errors: "" });
+        return;
+      }
+      const allLines = output.split("\n");
+      const relevantLines = allLines.filter((l: string) => tsFiles.some(f => l.includes(f)));
+      if (relevantLines.length > 0) {
+        resolve({ passed: false, errors: relevantLines.slice(0, 15).join("\n") });
+      } else {
+        resolve({ passed: true, errors: "" });
+      }
+    });
+  });
+}
+
+function buildFixPrompt(step: { filePath: string; description: string }, errors: string, lastAttemptFiles: string[]): string {
+  const fileContents = lastAttemptFiles.map(f => `=== ${f} ===\n${readFileContent(f)}`).join("\n\n");
+
+  return `Your previous code change caused TypeScript errors. Fix ONLY the errors while preserving the intended functionality.
+
+## Original Task
+- File: ${step.filePath}
+- Description: ${step.description}
+
+## TypeScript Errors to Fix
+${errors}
+
+## Current File Contents (with your changes applied)
+${fileContents}
+
+Fix the errors. Output the COMPLETE corrected file content for each file that needs fixing.
+
+Respond in JSON:
+{
+  "fileChanges": [
+    { "filePath": "path/to/file.ts", "action": "replace", "content": "complete corrected file content" }
+  ],
+  "shellCommands": []
+}`;
+}
+
+const MAX_FIX_ATTEMPTS = 2;
+
 export async function executeStep(step: {
   id: string;
   action: string;
@@ -232,7 +283,6 @@ export async function executeStep(step: {
 
   if (!isSafePath(step.filePath)) {
     result.error = `Unsafe path: ${step.filePath}`;
-    markStepFailed(step.id);
     return result;
   }
 
@@ -244,7 +294,6 @@ export async function executeStep(step: {
       prompt += `\n\n## Recent Failures (avoid repeating these mistakes)\n${failureContext}`;
     }
 
-    // Step 1: Opus with effort "medium" builds directly
     console.log(`[Builder/Opus] Building (medium effort): ${step.description}`);
     const buildResult1 = await builderCallClaude("claude-opus-4-6", prompt, "builder-opus", `build-${step.id}`, "medium");
     const parsed1 = extractJson(buildResult1.text);
@@ -260,7 +309,6 @@ export async function executeStep(step: {
       hadShellCommands = (parsed1.shellCommands?.length || 0) > 0;
     }
 
-    // Step 2: If step 1 produced nothing, retry with effort "high"
     if (result.filesModified.length === 0 && !hadShellCommands) {
       console.log(`[Builder/Opus] First attempt produced no changes, retrying (high effort)...`);
       const retryPrompt = prompt + "\n\nIMPORTANT: Your previous attempt produced no usable output. You MUST respond with valid JSON containing fileChanges and/or shellCommands.";
@@ -276,8 +324,40 @@ export async function executeStep(step: {
 
       if (result.filesModified.length === 0 && !hadShellCommands) {
         result.error = "Opus failed to produce valid changes after 2 attempts";
-        markStepFailed(step.id);
         return result;
+      }
+    }
+
+    if (result.filesModified.length > 0) {
+      const tscCheck = await quickTscCheck(result.filesModified);
+
+      if (!tscCheck.passed) {
+        console.log(`[Builder/Opus] TypeScript errors detected — entering fix loop (max ${MAX_FIX_ATTEMPTS} attempts)`);
+
+        for (let fixAttempt = 1; fixAttempt <= MAX_FIX_ATTEMPTS; fixAttempt++) {
+          console.log(`[Builder/Opus] Fix attempt ${fixAttempt}/${MAX_FIX_ATTEMPTS}...`);
+          const fixPrompt = buildFixPrompt(step, tscCheck.errors, result.filesModified);
+          const effort = fixAttempt === 1 ? "medium" : "high";
+          const fixResult = await builderCallClaude("claude-opus-4-6", fixPrompt, "builder-opus-fix", `fix-${step.id}-${fixAttempt}`, effort as any);
+          const fixParsed = extractJson(fixResult.text);
+
+          if (fixParsed?.fileChanges) {
+            const fixedFiles = applyChanges(fixParsed);
+            for (const f of fixedFiles) {
+              if (!result.filesModified.includes(f)) result.filesModified.push(f);
+            }
+          }
+
+          const recheck = await quickTscCheck(result.filesModified);
+          if (recheck.passed) {
+            console.log(`[Builder/Opus] Fix attempt ${fixAttempt} resolved TypeScript errors`);
+            break;
+          }
+
+          if (fixAttempt === MAX_FIX_ATTEMPTS) {
+            console.log(`[Builder/Opus] TypeScript errors persist after ${MAX_FIX_ATTEMPTS} fix attempts — continuing with best effort`);
+          }
+        }
       }
     }
 
@@ -288,13 +368,11 @@ export async function executeStep(step: {
 
     if (result.success) {
       markStepDone(step.id);
-    } else {
+    } else if (!result.error) {
       result.error = "No files were modified";
-      markStepFailed(step.id);
     }
   } catch (error: any) {
     result.error = error.message || String(error);
-    markStepFailed(step.id);
   }
 
   return result;
@@ -345,7 +423,7 @@ export async function executePlan(): Promise<BuildResult[]> {
 
       const depsReady = step.dependsOn.every(dep => {
         const depStep = plan!.steps.find(s => s.id === dep);
-        return depStep?.status === "done";
+        return depStep?.status === "done" || depStep?.status === "skipped";
       });
       const depsBlocked = step.dependsOn.some(dep => {
         const depStep = plan!.steps.find(s => s.id === dep);
