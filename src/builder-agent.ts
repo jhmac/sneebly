@@ -77,12 +77,62 @@ async function builderCallClaude(
   return { text: result.text };
 }
 
+function inferRelatedFiles(filePath: string, description: string): string[] {
+  const related: Set<string> = new Set();
+  const descLower = description.toLowerCase();
+
+  if (filePath.includes("routes.ts")) {
+    related.add("server/storage.ts");
+    related.add("shared/schema.ts");
+  }
+  if (filePath.includes("storage.ts")) {
+    related.add("shared/schema.ts");
+    related.add("server/routes.ts");
+  }
+  if (filePath.startsWith("client/src/")) {
+    related.add("shared/schema.ts");
+  }
+  if (filePath.startsWith("client/src/pages/")) {
+    related.add("client/src/App.tsx");
+    related.add("client/src/lib/queryClient.ts");
+  }
+  if (filePath.startsWith("client/src/components/")) {
+    related.add("client/src/lib/queryClient.ts");
+  }
+  if (filePath.includes("schema.ts")) {
+    related.add("server/storage.ts");
+    related.add("drizzle.config.ts");
+  }
+  if (descLower.includes("api") || descLower.includes("endpoint") || descLower.includes("route")) {
+    related.add("server/routes.ts");
+    related.add("server/storage.ts");
+    related.add("shared/schema.ts");
+  }
+  if (descLower.includes("database") || descLower.includes("table") || descLower.includes("schema") || descLower.includes("migration")) {
+    related.add("shared/schema.ts");
+    related.add("server/storage.ts");
+    related.add("drizzle.config.ts");
+  }
+  if (descLower.includes("component") || descLower.includes("page") || descLower.includes("ui")) {
+    related.add("shared/schema.ts");
+  }
+  if (descLower.includes("auth") || descLower.includes("clerk") || descLower.includes("user")) {
+    related.add("shared/schema.ts");
+    related.add("server/routes.ts");
+  }
+
+  related.delete(filePath);
+
+  return Array.from(related).filter(f => {
+    try {
+      return fs.existsSync(path.resolve(process.cwd(), f));
+    } catch { return false; }
+  }).slice(0, 6);
+}
+
 function buildPrompt(step: { id: string; action: string; filePath: string; description: string }): string {
   const currentContent = readFileContent(step.filePath);
-  const relatedFiles: string[] = [];
-  if (step.filePath.includes("routes.ts")) relatedFiles.push("server/storage.ts", "shared/schema.ts");
-  if (step.filePath.includes("storage.ts")) relatedFiles.push("shared/schema.ts");
-  if (step.filePath.startsWith("client/src/")) relatedFiles.push("shared/schema.ts");
+  const relatedFiles = inferRelatedFiles(step.filePath, step.description);
   const relatedContent = relatedFiles.map(f => `=== ${f} ===\n${readFileContent(f)}`).join("\n\n");
 
   return `Implement this code change.
@@ -101,8 +151,20 @@ ${relatedContent}
 
 Output the COMPLETE file content. Include all imports. Match existing code style.
 
-You can also run shell commands when needed (e.g., for migrations, type checking, package installs).
-Allowed commands include: npx drizzle-kit, npx tsc, tsc, npm run, npm install, npm test, node, cat, ls, grep, find, mkdir, cp, mv, touch.
+You can also run shell commands when needed (e.g., for migrations, type checking, package installs, linting).
+Allowed commands include:
+- npx drizzle-kit push/generate/migrate/check — database schema operations
+- npx tsc --noEmit / tsc --noEmit — TypeScript type checking
+- npm run <script> — any npm script (build, check, lint, dev, etc.)
+- npm install <package> — install specific npm packages (no global installs)
+- npm test — run tests
+- npx eslint / npx prettier — linting and formatting
+- cat, ls, head, tail, grep, find, wc — read and search files
+- mkdir, cp, mv, touch — create and manage files/directories
+- sed, awk, sort, uniq, diff — text processing
+- git status, git diff, git log — version control (read-only)
+
+IMPORTANT: Do NOT chain commands with && or ; — use separate shellCommands entries instead.
 
 Respond in JSON:
 {

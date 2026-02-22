@@ -189,8 +189,9 @@ ${storageContent.split("\n").slice(0, 50).join("\n")}
 3. If the spec was targeting the WRONG file (e.g., trying to create shared/types/*.ts when types belong in shared/schema.ts), explain that the work is already done or redirect to the correct approach.
 4. If the fix is straightforward and the target file is correct, provide the exact file changes.
 
-You can also run shell commands when needed (e.g., for migrations, type checking).
-Allowed commands include: npx drizzle-kit, npx tsc, tsc, npm run, npm install, npm test, node, cat, ls, grep, find, mkdir, cp, mv, touch.
+You can also run shell commands when needed (e.g., for migrations, type checking, package installs).
+Allowed commands: npx drizzle-kit push/generate/migrate/check, npx tsc --noEmit, npm run <script>, npm install <package>, npm test, npx eslint, cat, ls, head, tail, grep, find, wc, mkdir, cp, mv, touch, sed, awk, diff, sort, uniq, git status/diff/log.
+IMPORTANT: Do NOT chain commands with && or ; — use separate shellCommands entries instead.
 
 Respond in JSON:
 {
