@@ -155,7 +155,7 @@ You can also run shell commands when needed (e.g., for migrations, type checking
 Allowed commands include:
 - npx drizzle-kit push/generate/migrate/check — database schema operations
 - npx tsc --noEmit / tsc --noEmit — TypeScript type checking
-- npm run <script> — any npm script (build, check, lint, dev, etc.)
+- npm run <script> — safe npm scripts only (build, check, lint, dev, start, test, typecheck, format, db:push, db:generate, db:migrate, db:check, preview, clean)
 - npm install <package> — install specific npm packages (no global installs)
 - npm test — run tests
 - npx eslint / npx prettier — linting and formatting

@@ -1,6 +1,8 @@
 import { exec } from "child_process";
 import fs from "fs";
 import path from "path";
+import { isPathSafe } from "./path-safety";
+import { getSafePaths, getNeverModifyPaths } from "./identity";
 
 const LOG_FILE = path.join(process.cwd(), ".sneebly", "shell-log.jsonl");
 
@@ -90,6 +92,37 @@ export interface ShellResult {
   blocked?: boolean;
 }
 
+const SAFE_NPM_SCRIPTS = [
+  "build", "check", "lint", "dev", "start", "test",
+  "typecheck", "format", "db:push", "db:generate", "db:migrate",
+  "db:studio", "db:check", "preview", "clean",
+];
+
+const FILE_MUTATING_PREFIXES = ["mkdir ", "cp ", "mv ", "touch "];
+
+function extractPathArgs(command: string): string[] {
+  const parts = command.trim().split(/\s+/).slice(1);
+  return parts.filter(p => !p.startsWith("-") && p.includes("/"));
+}
+
+function checkPathSafety(command: string): { safe: boolean; reason?: string } {
+  const isMutating = FILE_MUTATING_PREFIXES.some(p => command.trim().startsWith(p));
+  if (!isMutating) return { safe: true };
+
+  const pathArgs = extractPathArgs(command);
+  if (pathArgs.length === 0) return { safe: true };
+
+  const safePaths = getSafePaths();
+  const neverModify = getNeverModifyPaths();
+
+  for (const arg of pathArgs) {
+    if (!isPathSafe(arg, safePaths, neverModify)) {
+      return { safe: false, reason: `Path "${arg}" is not in safe paths or is protected` };
+    }
+  }
+  return { safe: true };
+}
+
 function isCommandAllowed(command: string): { allowed: boolean; reason?: string } {
   const trimmed = command.trim();
 
@@ -102,6 +135,18 @@ function isCommandAllowed(command: string): { allowed: boolean; reason?: string 
   const matchesAllowlist = ALLOWED_PREFIXES.some(prefix => trimmed.startsWith(prefix));
   if (!matchesAllowlist) {
     return { allowed: false, reason: `Command "${trimmed.slice(0, 40)}..." not in allowlist. Allowed prefixes: ${ALLOWED_PREFIXES.slice(0, 8).join(", ")}...` };
+  }
+
+  if (trimmed.startsWith("npm run ")) {
+    const scriptName = trimmed.replace("npm run ", "").split(" ")[0];
+    if (!SAFE_NPM_SCRIPTS.includes(scriptName)) {
+      return { allowed: false, reason: `npm script "${scriptName}" not in safe script list. Allowed: ${SAFE_NPM_SCRIPTS.join(", ")}` };
+    }
+  }
+
+  const pathCheck = checkPathSafety(trimmed);
+  if (!pathCheck.safe) {
+    return { allowed: false, reason: `Shell path safety: ${pathCheck.reason}` };
   }
 
   return { allowed: true };
