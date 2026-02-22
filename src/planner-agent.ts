@@ -17,6 +17,7 @@ export interface PlanStep {
   status: "pending" | "in_progress" | "done" | "failed" | "skipped";
   failCount?: number;
   skipReason?: string;
+  lastError?: string;
 }
 
 export interface Plan {
@@ -119,6 +120,10 @@ CRITICAL RULES:
 - NEVER create split type files (shared/types/*.ts, shared/models/*.ts). All types come from shared/schema.ts via Drizzle inference.
 - For database changes: (1) modify shared/schema.ts, (2) add a shellCommand step for "npx drizzle-kit push".
 - Steps that need CLI commands should include "shellCommands" in the description (e.g., "Run npx drizzle-kit push to sync database").
+- Use action "modify" for existing files and "create" ONLY for truly new files.
+- Schema/table/migration work ALWAYS targets "shared/schema.ts" — NEVER server/db.ts or server/database.ts.
+- Route/endpoint work targets "server/routes.ts" — NEVER server/index.ts.
+- Storage/CRUD work targets "server/storage.ts".
 
 Respond in JSON:
 {
@@ -158,7 +163,17 @@ Respond in JSON:
     } else if (validation.action === "reject") {
       console.log(`[Planner] Removed invalid step "${step.id}": ${validation.reason}`);
     } else {
-      validatedSteps.push(step);
+      const fullPath = path.resolve(process.cwd(), step.filePath);
+      const fileExists = fs.existsSync(fullPath);
+      if (step.action === "create" && fileExists) {
+        console.log(`[Planner] Auto-corrected step "${step.id}": action "create" → "modify" (${step.filePath} already exists)`);
+        validatedSteps.push({ ...step, action: "modify" as const });
+      } else if (step.action === "modify" && !fileExists) {
+        console.log(`[Planner] Auto-corrected step "${step.id}": action "modify" → "create" (${step.filePath} does not exist)`);
+        validatedSteps.push({ ...step, action: "create" as const });
+      } else {
+        validatedSteps.push(step);
+      }
     }
   }
 
@@ -222,13 +237,14 @@ export function markStepDone(stepId: string): void {
 
 const MAX_STEP_FAILURES = 2;
 
-export function markStepFailed(stepId: string): void {
+export function markStepFailed(stepId: string, errorMsg?: string): void {
   const plan = loadCurrentPlan();
   if (!plan) return;
   const step = plan.steps.find(s => s.id === stepId);
   if (!step) return;
 
   step.failCount = (step.failCount || 0) + 1;
+  if (errorMsg) step.lastError = errorMsg;
 
   if (step.failCount >= MAX_STEP_FAILURES) {
     step.status = "skipped";

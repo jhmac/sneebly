@@ -481,7 +481,14 @@ async function runCycle(): Promise<string> {
 
     entry.stepDescription = nextStep.description;
     console.log(`[Autonomy] Opus building: ${nextStep.description}`);
-    const buildResult = await executeStep(nextStep, failureContext || undefined);
+
+    let stepContext = failureContext || undefined;
+    if ((nextStep as any).lastError && (nextStep as any).failCount && (nextStep as any).failCount > 0) {
+      const retryNote = `\n\nIMPORTANT — This step is being RETRIED (attempt ${((nextStep as any).failCount || 0) + 1}). Previous error: ${(nextStep as any).lastError}\nDo NOT repeat the same approach. Try a different strategy to accomplish the goal.`;
+      stepContext = (stepContext || "") + retryNote;
+    }
+
+    const buildResult = await executeStep(nextStep, stepContext);
 
     if (!buildResult.success) {
       if (buildResult.filesModified.length > 0) {
@@ -493,6 +500,9 @@ async function runCycle(): Promise<string> {
       }
 
       pushError(`Cycle ${state.currentCycle}: Build failed — ${buildResult.error}`);
+
+      const { markStepFailed: markFailed2 } = require("./planner-agent");
+      markFailed2(nextStep.id, buildResult.error || "Build produced no changes");
 
       const planAfterFail = loadCurrentPlan();
       const stepAfterFail = planAfterFail?.steps.find(s => s.id === nextStep.id);
@@ -528,7 +538,7 @@ async function runCycle(): Promise<string> {
         }
 
         const { markStepFailed } = require("./planner-agent");
-        markStepFailed(nextStep.id);
+        markStepFailed(nextStep.id, `Step verification failed: ${stepVerify.errors.slice(0, 3).join("; ")}`);
 
         pushError(`Cycle ${state.currentCycle}: Step verification failed — ${stepVerify.errors[0]}`);
         entry.result = "verify-failed";
@@ -549,7 +559,7 @@ async function runCycle(): Promise<string> {
         rollbackFiles(buildResult.filesModified);
       }
       const { markStepFailed: markFailed } = require("./planner-agent");
-      markFailed(nextStep.id);
+      markFailed(nextStep.id, "Server became unhealthy after changes");
       entry.result = "verify-failed";
       entry.error = "Server became unhealthy after changes";
       entry.verificationPassed = false;

@@ -128,6 +128,29 @@ export function validateSpec(spec: any): ValidationResult {
     };
   }
 
+  const wrongSchemaTargets = ["server/db.ts", "server/database.ts", "db.ts", "src/db.ts", "server/models.ts"];
+  const descLower = ((spec.description || "") + " " + (spec.constraint || "")).toLowerCase();
+  const isSchemaWork = descLower.includes("table") || descLower.includes("schema") || descLower.includes("pgTable") || descLower.includes("migration") || descLower.includes("database") || descLower.includes("column");
+
+  if (isSchemaWork && wrongSchemaTargets.includes(filePath)) {
+    const corrected = {
+      ...spec,
+      filePath: "shared/schema.ts",
+      action: "modify",
+      description: `${spec.description || "Add schema changes"} (auto-corrected from wrong target ${filePath}). Schema changes MUST go in shared/schema.ts.`,
+      _autoCorrected: true,
+      _originalFilePath: filePath,
+      _correctionReason: `"${filePath}" is not the schema file. All schema/table work must target shared/schema.ts.`,
+    };
+    return {
+      valid: false,
+      action: "redirect",
+      reason: `"${filePath}" redirected to shared/schema.ts — schema/table work must target shared/schema.ts`,
+      correctedSpec: corrected,
+      violatedSkill: "schema-location",
+    };
+  }
+
   for (const rule of rules) {
     for (const pattern of rule.neverPatterns) {
       if (pattern.test(filePath)) {

@@ -130,16 +130,72 @@ function inferRelatedFiles(filePath: string, description: string): string[] {
   }).slice(0, 6);
 }
 
+function autoCorrectStep(step: { id: string; action: string; filePath: string; description: string }): { id: string; action: string; filePath: string; description: string; corrections: string[] } {
+  const corrections: string[] = [];
+  let { action, filePath, description } = step;
+
+  const fullPath = path.resolve(process.cwd(), filePath);
+  const fileExists = fs.existsSync(fullPath);
+
+  if (action === "create" && fileExists) {
+    action = "modify";
+    corrections.push(`Auto-corrected action: "create" → "modify" (${filePath} already exists)`);
+  } else if (action === "modify" && !fileExists) {
+    action = "create";
+    corrections.push(`Auto-corrected action: "modify" → "create" (${filePath} does not exist)`);
+  }
+
+  const descLower = description.toLowerCase();
+  const isSchemaWork = descLower.includes("table") || descLower.includes("schema") || descLower.includes("pgTable") || descLower.includes("migration") || descLower.includes("database column") || descLower.includes("add column");
+  const wrongSchemaTargets = ["server/db.ts", "server/database.ts", "db.ts", "src/db.ts", "server/models.ts"];
+
+  if (isSchemaWork && wrongSchemaTargets.includes(filePath)) {
+    const oldPath = filePath;
+    filePath = "shared/schema.ts";
+    action = fs.existsSync(path.resolve(process.cwd(), "shared/schema.ts")) ? "modify" : "create";
+    corrections.push(`Auto-corrected filePath: "${oldPath}" → "shared/schema.ts" (schema changes belong in shared/schema.ts)`);
+  }
+
+  const isRouteWork = descLower.includes("endpoint") || descLower.includes("api route") || descLower.includes("express route");
+  if (isRouteWork && filePath === "server/index.ts") {
+    const routesExists = fs.existsSync(path.resolve(process.cwd(), "server/routes.ts"));
+    if (routesExists) {
+      filePath = "server/routes.ts";
+      action = "modify";
+      corrections.push(`Auto-corrected filePath: "server/index.ts" → "server/routes.ts" (routes belong in routes.ts)`);
+    }
+  }
+
+  const isStorageWork = descLower.includes("storage") || descLower.includes("repository") || descLower.includes("crud");
+  if (isStorageWork && (filePath === "server/db.ts" || filePath === "server/database.ts")) {
+    const storageExists = fs.existsSync(path.resolve(process.cwd(), "server/storage.ts"));
+    if (storageExists) {
+      filePath = "server/storage.ts";
+      action = "modify";
+      corrections.push(`Auto-corrected filePath: "${step.filePath}" → "server/storage.ts" (storage ops belong in storage.ts)`);
+    }
+  }
+
+  if (corrections.length > 0) {
+    console.log(`[Builder] Auto-corrected step ${step.id}: ${corrections.join("; ")}`);
+  }
+
+  return { id: step.id, action, filePath, description, corrections };
+}
+
 function buildPrompt(step: { id: string; action: string; filePath: string; description: string }): string {
   const currentContent = readFileContent(step.filePath);
   const relatedFiles = inferRelatedFiles(step.filePath, step.description);
   const relatedContent = relatedFiles.map(f => `=== ${f} ===\n${readFileContent(f)}`).join("\n\n");
+
+  const fileExists = fs.existsSync(path.resolve(process.cwd(), step.filePath));
 
   return `Implement this code change.
 
 ## Task
 - File: ${step.filePath}
 - Action: ${step.action}
+- File exists: ${fileExists ? "YES — modify the existing file" : "NO — create a new file"}
 - Description: ${step.description}
 
 ## Current File
@@ -273,12 +329,15 @@ Respond in JSON:
 
 const MAX_FIX_ATTEMPTS = 2;
 
-export async function executeStep(step: {
+export async function executeStep(rawStep: {
   id: string;
   action: string;
   filePath: string;
   description: string;
 }, failureContext?: string): Promise<BuildResult> {
+  const corrected = autoCorrectStep(rawStep);
+  const step = { id: corrected.id, action: corrected.action, filePath: corrected.filePath, description: corrected.description };
+
   const result: BuildResult = { stepId: step.id, success: false, filesModified: [] };
 
   if (!isSafePath(step.filePath)) {
@@ -290,6 +349,9 @@ export async function executeStep(step: {
 
   try {
     let prompt = buildPrompt(step);
+    if (corrected.corrections.length > 0) {
+      prompt += `\n\n## Auto-Corrections Applied\nThe following corrections were made to the original plan step:\n${corrected.corrections.map(c => `- ${c}`).join("\n")}\nWork with the corrected values above, not the original plan.`;
+    }
     if (failureContext) {
       prompt += `\n\n## Recent Failures (avoid repeating these mistakes)\n${failureContext}`;
     }
