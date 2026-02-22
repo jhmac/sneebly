@@ -189,17 +189,17 @@ export async function executeStep(step: {
     result.usedOpus = true;
 
     let shellSuccess = true;
+    let hadShellCommands = false;
+
     if (parsed1) {
       result.filesModified = applyChanges(parsed1);
       const shellResults = await executeShellCommands(parsed1);
       shellSuccess = shellResults.allSucceeded;
+      hadShellCommands = (parsed1.shellCommands?.length || 0) > 0;
     }
 
-    const hasFileChanges = result.filesModified.length > 0;
-    const hasShellCommands = parsed1?.shellCommands?.length > 0;
-
-    // Step 2: If step 1 failed, retry with effort "high"
-    if (!hasFileChanges && !hasShellCommands) {
+    // Step 2: If step 1 produced nothing, retry with effort "high"
+    if (result.filesModified.length === 0 && !hadShellCommands) {
       console.log(`[Builder/Opus] First attempt produced no changes, retrying (high effort)...`);
       const retryPrompt = prompt + "\n\nIMPORTANT: Your previous attempt produced no usable output. You MUST respond with valid JSON containing fileChanges and/or shellCommands.";
       const buildResult2 = await builderCallClaude("claude-opus-4-6", retryPrompt, "builder-opus-retry", `build-retry-${step.id}`, "high");
@@ -209,16 +209,20 @@ export async function executeStep(step: {
         result.filesModified = applyChanges(parsed2);
         const shellResults2 = await executeShellCommands(parsed2);
         shellSuccess = shellResults2.allSucceeded;
+        hadShellCommands = (parsed2.shellCommands?.length || 0) > 0;
       }
 
-      if (result.filesModified.length === 0 && !(parsed2?.shellCommands?.length > 0)) {
+      if (result.filesModified.length === 0 && !hadShellCommands) {
         result.error = "Opus failed to produce valid changes after 2 attempts";
         markStepFailed(step.id);
         return result;
       }
     }
 
-    result.success = (result.filesModified.length > 0 || hasShellCommands) && shellSuccess;
+    result.success = (result.filesModified.length > 0 || hadShellCommands) && shellSuccess;
+    if (!shellSuccess) {
+      result.error = "One or more required shell commands failed";
+    }
 
     if (result.success) {
       markStepDone(step.id);

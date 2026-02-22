@@ -292,15 +292,24 @@ If the work is already done (e.g., schema already has the table), set canFix to 
     for (const cmd of shellCommands) {
       console.log(`[AutoFixer] Running shell command: ${cmd.command} — ${cmd.description || ""}`);
       const shellResult = await runShellCommand(cmd.command, { timeoutMs: 60000 });
-      if (!shellResult.success && cmd.required) {
-        result.diagnosis += ` — Shell command failed: ${cmd.command} (${shellResult.stderr?.slice(0, 200)})`;
-        shellSuccess = false;
+      if (!shellResult.success) {
+        const errMsg = ` — Shell command failed: ${cmd.command} (exit ${shellResult.exitCode}, stderr: ${shellResult.stderr?.slice(0, 300)})`;
+        result.diagnosis += errMsg;
+        console.log(`[AutoFixer]${errMsg}`);
+        if (cmd.required !== false) {
+          shellSuccess = false;
+        }
+      } else {
+        console.log(`[AutoFixer] Shell command succeeded: ${cmd.command} (${shellResult.durationMs}ms)`);
       }
     }
 
     const hasChanges = result.filesModified.length > 0 || shellCommands.length > 0;
     result.success = (hasChanges && shellSuccess) || !fix.canFix;
     result.action = result.success ? "fixed" : "failed";
+    if (!shellSuccess) {
+      result.error = "Required shell command(s) failed";
+    }
     logFix(result);
     return result;
 
