@@ -3,6 +3,7 @@ import path from "path";
 import { isPathSafe } from "./path-safety";
 import { getSafePaths, getNeverModifyPaths } from "./identity";
 import { extractJson, callClaude } from "./utils";
+import { runShellCommand } from "./shell-executor";
 
 const DATA_DIR = path.join(process.cwd(), ".sneebly");
 const BLOCKERS_FILE = path.join(DATA_DIR, "blockers.json");
@@ -188,6 +189,9 @@ ${storageContent.split("\n").slice(0, 50).join("\n")}
 3. If the spec was targeting the WRONG file (e.g., trying to create shared/types/*.ts when types belong in shared/schema.ts), explain that the work is already done or redirect to the correct approach.
 4. If the fix is straightforward and the target file is correct, provide the exact file changes.
 
+You can also run shell commands when needed (e.g., for migrations, type checking).
+Allowed commands include: npx drizzle-kit, npx tsc, tsc, npm run, npm install, npm test, node, cat, ls, grep, find, mkdir, cp, mv, touch.
+
 Respond in JSON:
 {
   "diagnosis": "What went wrong and why",
@@ -201,6 +205,9 @@ Respond in JSON:
       "oldContent": "content to replace (for replace action only, must be exact match)",
       "description": "what this change does"
     }
+  ],
+  "shellCommands": [
+    { "command": "npx drizzle-kit push", "description": "Push schema changes", "required": true }
   ]
 }
 
@@ -280,7 +287,19 @@ If the work is already done (e.g., schema already has the table), set canFix to 
       }
     }
 
-    result.success = result.filesModified.length > 0 || !fix.canFix;
+    const shellCommands = fix.shellCommands || [];
+    let shellSuccess = true;
+    for (const cmd of shellCommands) {
+      console.log(`[AutoFixer] Running shell command: ${cmd.command} — ${cmd.description || ""}`);
+      const shellResult = await runShellCommand(cmd.command, { timeoutMs: 60000 });
+      if (!shellResult.success && cmd.required) {
+        result.diagnosis += ` — Shell command failed: ${cmd.command} (${shellResult.stderr?.slice(0, 200)})`;
+        shellSuccess = false;
+      }
+    }
+
+    const hasChanges = result.filesModified.length > 0 || shellCommands.length > 0;
+    result.success = (hasChanges && shellSuccess) || !fix.canFix;
     result.action = result.success ? "fixed" : "failed";
     logFix(result);
     return result;

@@ -4,6 +4,7 @@ import { loadCurrentPlan, markStepDone, markStepFailed, markStepInProgress } fro
 import { isPathSafe } from "./path-safety";
 import { getSafePaths, getNeverModifyPaths } from "./identity";
 import { extractJson, callClaude } from "./utils";
+import { runShellCommand } from "./shell-executor";
 
 function isSafePath(filePath: string): boolean {
   const safePaths = getSafePaths();
@@ -100,12 +101,39 @@ ${relatedContent}
 
 Output the COMPLETE file content. Include all imports. Match existing code style.
 
+You can also run shell commands when needed (e.g., for migrations, type checking, package installs).
+Allowed commands include: npx drizzle-kit, npx tsc, tsc, npm run, npm install, npm test, node, cat, ls, grep, find, mkdir, cp, mv, touch.
+
 Respond in JSON:
 {
   "fileChanges": [
     { "filePath": "path/to/file.ts", "action": "create|replace|append", "content": "complete file content" }
+  ],
+  "shellCommands": [
+    { "command": "npx drizzle-kit push", "description": "Push schema changes to database", "required": true }
   ]
 }`;
+}
+
+async function executeShellCommands(buildOutput: any): Promise<{ results: any[]; allSucceeded: boolean }> {
+  const commands = buildOutput.shellCommands || [];
+  if (commands.length === 0) return { results: [], allSucceeded: true };
+
+  const results: any[] = [];
+  let allSucceeded = true;
+
+  for (const cmd of commands) {
+    console.log(`[Builder] Running shell command: ${cmd.command} — ${cmd.description || ""}`);
+    const result = await runShellCommand(cmd.command, { timeoutMs: 60000 });
+    results.push({ ...cmd, ...result });
+
+    if (!result.success && cmd.required) {
+      console.log(`[Builder] Required command failed: ${cmd.command}`);
+      allSucceeded = false;
+    }
+  }
+
+  return { results, allSucceeded };
 }
 
 function applyChanges(buildOutput: any): string[] {
@@ -160,29 +188,37 @@ export async function executeStep(step: {
     const parsed1 = extractJson(buildResult1.text);
     result.usedOpus = true;
 
+    let shellSuccess = true;
     if (parsed1) {
       result.filesModified = applyChanges(parsed1);
+      const shellResults = await executeShellCommands(parsed1);
+      shellSuccess = shellResults.allSucceeded;
     }
 
+    const hasFileChanges = result.filesModified.length > 0;
+    const hasShellCommands = parsed1?.shellCommands?.length > 0;
+
     // Step 2: If step 1 failed, retry with effort "high"
-    if (result.filesModified.length === 0) {
+    if (!hasFileChanges && !hasShellCommands) {
       console.log(`[Builder/Opus] First attempt produced no changes, retrying (high effort)...`);
-      const retryPrompt = prompt + "\n\nIMPORTANT: Your previous attempt produced no usable output. You MUST respond with valid JSON containing fileChanges.";
+      const retryPrompt = prompt + "\n\nIMPORTANT: Your previous attempt produced no usable output. You MUST respond with valid JSON containing fileChanges and/or shellCommands.";
       const buildResult2 = await builderCallClaude("claude-opus-4-6", retryPrompt, "builder-opus-retry", `build-retry-${step.id}`, "high");
       const parsed2 = extractJson(buildResult2.text);
 
       if (parsed2) {
         result.filesModified = applyChanges(parsed2);
+        const shellResults2 = await executeShellCommands(parsed2);
+        shellSuccess = shellResults2.allSucceeded;
       }
 
-      if (result.filesModified.length === 0) {
+      if (result.filesModified.length === 0 && !(parsed2?.shellCommands?.length > 0)) {
         result.error = "Opus failed to produce valid changes after 2 attempts";
         markStepFailed(step.id);
         return result;
       }
     }
 
-    result.success = result.filesModified.length > 0;
+    result.success = (result.filesModified.length > 0 || hasShellCommands) && shellSuccess;
 
     if (result.success) {
       markStepDone(step.id);
