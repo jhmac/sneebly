@@ -1,0 +1,471 @@
+import fs from "fs";
+import path from "path";
+import { getSafePaths } from "./identity";
+import { getCompletionPercent } from "./progress-tracker";
+import { extractJson, callClaude } from "./utils";
+import { validateSpec } from "./spec-validator";
+import { getGroundTruth } from "./ground-truth-builder";
+import { getRelevantKnowledge } from "./knowledge-base";
+
+const PLAN_FILE = path.join(process.cwd(), ".sneebly", "current-plan.json");
+const GOALS_FILE = path.join(process.cwd(), "GOALS.md");
+
+export interface PlanStep {
+  id: string;
+  action: "create" | "modify" | "append";
+  filePath: string;
+  description: string;
+  dependsOn: string[];
+  status: "pending" | "in_progress" | "done" | "failed" | "skipped";
+  failCount?: number;
+  costSpent?: number;
+  skipReason?: string;
+  lastError?: string;
+  errors?: string[];
+}
+
+export interface Plan {
+  id: string;
+  goal: string;
+  phase: string;
+  steps: PlanStep[];
+  createdAt: string;
+  status: "active" | "completed" | "failed" | "cancelled";
+}
+
+function readGoals(): string {
+  try {
+    return fs.readFileSync(GOALS_FILE, "utf-8");
+  } catch {
+    return "";
+  }
+}
+
+function readFile(filePath: string, maxLines = 150): string {
+  try {
+    const resolved = path.resolve(process.cwd(), filePath);
+    if (!fs.existsSync(resolved)) return `[Does not exist]`;
+    const lines = fs.readFileSync(resolved, "utf-8").split("\n");
+    return lines.slice(0, maxLines).join("\n") + (lines.length > maxLines ? "\n...[truncated]" : "");
+  } catch {
+    return `[Cannot read]`;
+  }
+}
+
+export function loadCurrentPlan(): Plan | null {
+  try {
+    if (fs.existsSync(PLAN_FILE)) {
+      return JSON.parse(fs.readFileSync(PLAN_FILE, "utf-8"));
+    }
+  } catch {}
+  return null;
+}
+
+export function savePlan(plan: Plan): void {
+  const dir = path.dirname(PLAN_FILE);
+  if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(PLAN_FILE, JSON.stringify(plan, null, 2), "utf-8");
+}
+
+export async function generatePlan(failureContext?: string): Promise<Plan> {
+  const goals = readGoals();
+  const schema = readFile("shared/schema.ts", 200);
+
+  const goalsExcerpt = goals.length > 6000 ? goals.slice(0, 6000) + "\n...[truncated]" : goals;
+
+  const safeTargets = getSafePaths().join(", ");
+
+  let memoryContext = "";
+  try {
+    const mm = await import("./memory-manager");
+    const memory = mm.getMemoryForPrompt(["Conventions", "Fix Patterns", "Mistakes"]);
+    if (memory) memoryContext = `\n## Learned Conventions & Patterns\n${memory}\n`;
+  } catch {}
+
+  let blockerContext = "";
+  try {
+    const sm = await import("./spec-monitor");
+    const count = sm.getActiveBlockerCount();
+    if (count > 0) blockerContext = `\n## Active Blockers: ${count}\n`;
+  } catch {}
+
+  let completionContext = "";
+  try {
+    const pct = getCompletionPercent();
+    if (pct > 0) completionContext = `\n## Current Completion: ${pct}%\n`;
+  } catch {}
+
+  const failureSection = failureContext
+    ? `\n## Recent Failures (DO NOT repeat these mistakes)\n${failureContext}\n`
+    : "";
+
+  let journalContext = "";
+  try {
+    const journalPath = path.join(process.cwd(), ".sneebly", "session-journal.json");
+    if (fs.existsSync(journalPath)) {
+      const journal = JSON.parse(fs.readFileSync(journalPath, "utf-8"));
+      const entries = (journal.entries || []).slice(-3);
+      if (entries.length > 0) {
+        journalContext = `\n## Recent Cycle History\n${entries.map((e: any) => `- Cycle ${e.cycle}: ${e.result}${e.stepDescription ? ` (${e.stepDescription})` : ""}${e.error ? ` — ${e.error}` : ""}`).join("\n")}\n`;
+      }
+    }
+  } catch {}
+
+  let groundTruthSection = "";
+  try {
+    const gt = getGroundTruth();
+    if (gt) {
+      groundTruthSection = `\n## Verified Ground Truth (AUTHORITATIVE — trust this over assumptions)
+**PostgreSQL tables that ACTUALLY EXIST in the database:** ${gt.dbTables.join(", ") || "none"}
+**Tables defined in shared/schema.ts:** ${gt.schemaTableNames.join(", ") || "none"}
+**Already blocked constraints (do NOT plan work for these):**
+${gt.blockedConstraints.map(c => `  - "${c.description}" (failed ${c.failCount}x)`).join("\n") || "  none"}
+**Already resolved constraints (these are DONE — do NOT re-plan them):**
+${gt.resolvedConstraints.map(c => `  - "${c.description}": ${c.evidence}`).join("\n") || "  none"}
+**Key file existence:**
+${Object.entries(gt.keyFiles).map(([f,v]) => `  - ${f}: ${v.exists ? `exists (${v.lines} lines)` : "MISSING"}`).join("\n")}
+\n`;
+    }
+  } catch {}
+
+  const prompt = `Analyze what's been built and plan what to build next.
+
+## GOALS.md
+${goalsExcerpt}
+
+## Current Schema (shared/schema.ts, first 200 lines)
+${schema}
+${groundTruthSection}${memoryContext}${blockerContext}${completionContext}${journalContext}${failureSection}
+Pick the single highest-priority missing feature. Break it into concrete steps (max 6).
+Only target files in safe paths: ${safeTargets}
+
+CRITICAL RULES:
+- NEVER create migration SQL files (drizzle/*.sql, migrations/*.sql). Migrations are auto-generated by running "npx drizzle-kit push" after schema changes.
+- NEVER create split type files (shared/types/*.ts, shared/models/*.ts). All types come from shared/schema.ts via Drizzle inference.
+- For database changes: (1) modify shared/schema.ts, (2) add a shellCommand step for "npx drizzle-kit push".
+- Steps that need CLI commands should include "shellCommands" in the description (e.g., "Run npx drizzle-kit push to sync database").
+- Use action "modify" for existing files and "create" ONLY for truly new files that are MISSING from the ground truth above.
+- Schema/table/migration work ALWAYS targets "shared/schema.ts" — NEVER server/db.ts or server/database.ts.
+- Route/endpoint work targets "server/routes.ts" — NEVER server/index.ts.
+- Storage/CRUD work targets "server/storage.ts".
+- IMPORTANT: If ground truth shows a DB table already exists and schema.ts already defines it, do NOT plan any schema work for it.
+
+Respond in JSON:
+{
+  "goal": "What we're building",
+  "phase": "Which phase",
+  "steps": [
+    { "id": "step-1", "action": "create|modify|append", "filePath": "path", "description": "What to do", "dependsOn": [] }
+  ]
+}`;
+
+  const result = await callClaude(prompt, {
+    model: "claude-opus-4-6",
+    maxTokens: 8192,
+    temperature: 0.3,
+    effort: "high",
+    agent: "planner-opus",
+    task: "plan-generation",
+    feature: "autonomy-plan",
+  });
+
+  const planData = extractJson(result.text);
+  if (!planData) throw new Error("Planner did not return valid JSON");
+
+  const rawSteps = (planData.steps || []).map((s: any) => ({ ...s, status: "pending" as const }));
+
+  const validatedSteps: PlanStep[] = [];
+  for (const step of rawSteps) {
+    const validation = validateSpec({ filePath: step.filePath, description: step.description, action: step.action });
+    if (validation.action === "redirect" && validation.correctedSpec) {
+      console.log(`[Planner] Auto-corrected step "${step.id}": ${step.filePath} → ${validation.correctedSpec.filePath} (${validation.reason})`);
+      validatedSteps.push({
+        ...step,
+        filePath: validation.correctedSpec.filePath,
+        action: validation.correctedSpec.action || step.action,
+        description: validation.correctedSpec.description || step.description,
+      });
+    } else if (validation.action === "reject") {
+      console.log(`[Planner] Removed invalid step "${step.id}": ${validation.reason}`);
+    } else {
+      const fullPath = path.resolve(process.cwd(), step.filePath);
+      const fileExists = fs.existsSync(fullPath);
+      if (step.action === "create" && fileExists) {
+        console.log(`[Planner] Auto-corrected step "${step.id}": action "create" → "modify" (${step.filePath} already exists)`);
+        validatedSteps.push({ ...step, action: "modify" as const });
+      } else if (step.action === "modify" && !fileExists) {
+        console.log(`[Planner] Auto-corrected step "${step.id}": action "modify" → "create" (${step.filePath} does not exist)`);
+        validatedSteps.push({ ...step, action: "create" as const });
+      } else {
+        validatedSteps.push(step);
+      }
+    }
+  }
+
+  if (validatedSteps.length === 0 && rawSteps.length > 0) {
+    throw new Error("All plan steps were invalid and removed by validation");
+  }
+
+  const plan: Plan = {
+    id: `plan-${Date.now()}`,
+    goal: planData.goal || "Unknown goal",
+    phase: planData.phase || "Unknown phase",
+    steps: validatedSteps,
+    createdAt: new Date().toISOString(),
+    status: "active",
+  };
+
+  savePlan(plan);
+  console.log(`[Planner/Opus] Created plan: ${plan.goal} (${plan.steps.length} steps${rawSteps.length !== validatedSteps.length ? `, ${rawSteps.length - validatedSteps.length} corrected/removed` : ""})`);
+  return plan;
+}
+
+export async function generateFeaturePlan(
+  featureTitle: string,
+  featureDescription: string,
+  options: {
+    lastTestFailureContext?: string;
+    alternativeHypothesis?: boolean;
+    previousApproach?: string;
+    priorKnowledge?: Array<{ title: string; approach: string; qualityDelta: number }>;
+    priorFailureCount?: number;
+  } = {}
+): Promise<Plan> {
+  const schema = readFile("shared/schema.ts", 200);
+  const safeTargets = getSafePaths().join(", ");
+
+  let groundTruthSection = "";
+  try {
+    const gt = getGroundTruth();
+    if (gt) {
+      groundTruthSection = `\n## Verified Ground Truth\n**DB tables that exist:** ${gt.dbTables.join(", ") || "none"}\n**Schema tables:** ${gt.schemaTableNames.join(", ") || "none"}\n`;
+    }
+  } catch {}
+
+  const testFailureSection = options.lastTestFailureContext
+    ? `\n## 🚨 CRITICAL: Previous Acceptance Test FAILED — Read carefully before planning\nThis feature was attempted before but the acceptance test FAILED. The test script shows EXACTLY what must exist in the codebase.\n\`\`\`\n${options.lastTestFailureContext.slice(0, 3000)}\n\`\`\`\n\nBEFORE writing your plan:\n1. Study the test script — it shows the exact grep patterns, files, endpoints, or strings that must exist\n2. Your plan steps MUST directly create or modify the files the test checks\n3. Do NOT rebuild things that already exist — add only what is missing\n4. If the test greps for a string in server/routes.ts, your plan must modify server/routes.ts to contain that string\n`
+    : "";
+
+  const alternativeSection = options.alternativeHypothesis && options.previousApproach
+    ? `\n## ⚠️ Alternative Approach Required\nA first implementation approach was attempted with this goal: "${options.previousApproach}". Generate a COMPLETELY DIFFERENT approach — use different files, different patterns, or a different strategy to achieve the same feature goal. Do not repeat the same plan.\n`
+    : "";
+
+  let priorKnowledgeSection = "";
+  const knowledgeEntries: Array<{ title: string; approach: string; qualityDelta: number }> =
+    options.priorKnowledge !== undefined
+      ? options.priorKnowledge
+      : (() => {
+          try { return getRelevantKnowledge(featureTitle, 5); }
+          catch { return []; }
+        })();
+
+  if (knowledgeEntries.length > 0) {
+    priorKnowledgeSection = `\n## Proven Patterns for This Codebase (apply these)\n${
+      knowledgeEntries.map(e =>
+        `- **${e.title.slice(0, 60)}**: ${e.approach.slice(0, 200)}${e.qualityDelta !== 0 ? ` [quality delta: ${e.qualityDelta >= 0 ? "+" : ""}${e.qualityDelta}]` : ""}`
+      ).join("\n")
+    }\n`;
+  }
+
+  const prompt = `You are planning the implementation of a specific roadmap feature.
+
+## Feature to implement
+Title: ${featureTitle}
+Description: ${featureDescription}${testFailureSection}${alternativeSection}${priorKnowledgeSection}
+
+## Current Schema (shared/schema.ts, first 200 lines)
+${schema}
+${groundTruthSection}
+Break this feature into concrete implementation steps (max 6 steps). Focus ONLY on this feature.
+Only target files in safe paths: ${safeTargets}
+
+CRITICAL RULES:
+- NEVER create migration SQL files. Schema changes use: (1) modify shared/schema.ts, (2) shellCommand "npx drizzle-kit push".
+- NEVER create split type files. All types from shared/schema.ts.
+- Use action "modify" for existing files, "create" only for truly new/missing files.
+- Route work → server/routes.ts; Storage/CRUD → server/storage.ts; Schema → shared/schema.ts.
+
+Respond in JSON:
+{
+  "goal": "What this feature implements",
+  "phase": "Which phase",
+  "steps": [
+    { "id": "step-1", "action": "create|modify|append", "filePath": "path", "description": "What to do", "dependsOn": [] }
+  ]
+}`;
+
+  const failures = options.priorFailureCount ?? 0;
+  const plannerEffort = failures >= 2 ? "max" : failures === 1 ? "high" : "medium";
+  if (failures >= 1) {
+    console.log(`[Planner/Opus] Feature "${featureTitle}" — attempt ${failures + 1}, escalating to Opus ${plannerEffort.toUpperCase()}`);
+  }
+  const result = await callClaude(prompt, {
+    model: "claude-opus-4-6",
+    maxTokens: failures >= 2 ? 16000 : 4096,
+    effort: plannerEffort,
+    agent: "planner-opus-feature",
+    task: "feature-plan-generation",
+    feature: featureTitle,
+  });
+
+  const planData = extractJson(result.text);
+  if (!planData) throw new Error(`Feature planner did not return valid JSON for: ${featureTitle}`);
+
+  const rawSteps = (planData.steps || []).map((s: { id?: string; action?: string; filePath?: string; description?: string; dependsOn?: string[] }) => ({
+    id: s.id || `step-${Date.now()}`,
+    action: (s.action || "modify") as "create" | "modify" | "append",
+    filePath: s.filePath || "",
+    description: s.description || "",
+    dependsOn: s.dependsOn || [],
+    status: "pending" as const,
+  }));
+
+  const validatedSteps: PlanStep[] = [];
+  for (const step of rawSteps) {
+    const validation = validateSpec({ filePath: step.filePath, description: step.description, action: step.action });
+    if (validation.action === "redirect" && validation.correctedSpec) {
+      validatedSteps.push({ ...step, filePath: validation.correctedSpec.filePath, action: (validation.correctedSpec.action || step.action) as "create" | "modify" | "append", description: validation.correctedSpec.description || step.description });
+    } else if (validation.action !== "reject") {
+      const fullPath = path.resolve(process.cwd(), step.filePath);
+      if (step.action === "create" && fs.existsSync(fullPath)) {
+        validatedSteps.push({ ...step, action: "modify" as const });
+      } else if (step.action === "modify" && !fs.existsSync(fullPath)) {
+        validatedSteps.push({ ...step, action: "create" as const });
+      } else {
+        validatedSteps.push(step);
+      }
+    }
+  }
+
+  if (validatedSteps.length === 0 && rawSteps.length > 0) {
+    throw new Error(`All plan steps for feature "${featureTitle}" were invalid`);
+  }
+
+  const plan: Plan = {
+    id: `feature-plan-${Date.now()}`,
+    goal: planData.goal || featureTitle,
+    phase: planData.phase || "roadmap",
+    steps: validatedSteps,
+    createdAt: new Date().toISOString(),
+    status: "active",
+  };
+
+  console.log(`[Planner/Opus] Feature plan created: ${plan.goal} (${plan.steps.length} steps) — NOT saved to shared plan file`);
+  return plan;
+}
+
+export function getNextStep(): PlanStep | null {
+  const plan = loadCurrentPlan();
+  if (!plan || plan.status !== "active") return null;
+
+  for (const step of plan.steps) {
+    if (step.status !== "pending") continue;
+
+    const depsReady = step.dependsOn.every(dep => {
+      const depStep = plan.steps.find(s => s.id === dep);
+      return depStep?.status === "done" || depStep?.status === "skipped";
+    });
+
+    if (depsReady) return step;
+  }
+
+  const allDone = plan.steps.every(s => s.status === "done" || s.status === "skipped" || s.status === "failed");
+  if (allDone) {
+    const doneCount = plan.steps.filter(s => s.status === "done").length;
+    if (doneCount > 0) {
+      plan.status = "completed";
+      savePlan(plan);
+      console.log(`[Planner] Plan auto-completed: ${doneCount}/${plan.steps.length} steps done`);
+    }
+  }
+
+  return null;
+}
+
+export function markStepDone(stepId: string): void {
+  const plan = loadCurrentPlan();
+  if (!plan) return;
+  const step = plan.steps.find(s => s.id === stepId);
+  if (step) step.status = "done";
+  if (plan.steps.every(s => s.status === "done")) {
+    plan.status = "completed";
+    console.log(`[Planner] Plan completed: ${plan.goal}`);
+  }
+  savePlan(plan);
+}
+
+const MAX_STEP_FAILURES = 1;
+
+export function markStepFailed(stepId: string, errorMsg?: string, costSpent?: number): void {
+  const plan = loadCurrentPlan();
+  if (!plan) return;
+  const step = plan.steps.find(s => s.id === stepId);
+  if (!step) return;
+
+  step.failCount = (step.failCount || 0) + 1;
+  if (errorMsg) {
+    step.lastError = errorMsg;
+    if (!step.errors) step.errors = [];
+    step.errors.push(errorMsg);
+  }
+  if (costSpent) step.costSpent = (step.costSpent || 0) + costSpent;
+
+  const overCostBudget = (step.costSpent || 0) >= 2.0;
+
+  if (step.failCount >= MAX_STEP_FAILURES || overCostBudget) {
+    if (overCostBudget) {
+      step.skipReason = `Skipped — cost budget exceeded ($${(step.costSpent || 0).toFixed(2)} spent on this step)`;
+      console.log(`[Planner] Step ${stepId} skipped — cost budget exceeded ($${(step.costSpent || 0).toFixed(2)} spent)`);
+    } else {
+      step.skipReason = `Skipped after ${step.failCount} failed attempt(s) — Opus escalation will retry`;
+    }
+    step.status = "skipped";
+    console.log(`[Planner] Step ${stepId} queued for Opus escalation`);
+
+    const hasRemainingWork = plan.steps.some(s => {
+      if (s.status !== "pending") return false;
+      const depOnSkipped = s.dependsOn.includes(stepId);
+      if (depOnSkipped) return false;
+      return true;
+    });
+
+    for (const s of plan.steps) {
+      if (s.status === "pending" && s.dependsOn.includes(stepId)) {
+        s.status = "skipped";
+        s.skipReason = `Dependency ${stepId} was skipped`;
+        console.log(`[Planner] Step ${s.id} skipped (depends on skipped step ${stepId})`);
+      }
+    }
+
+    if (!hasRemainingWork) {
+      const doneCount = plan.steps.filter(s => s.status === "done").length;
+      if (doneCount > 0) {
+        plan.status = "completed";
+        console.log(`[Planner] Plan completed with ${doneCount}/${plan.steps.length} steps done (rest skipped)`);
+      } else {
+        plan.status = "failed";
+        console.log(`[Planner] Plan failed — all steps skipped or failed`);
+      }
+    }
+  } else {
+    step.status = "pending";
+    console.log(`[Planner] Step ${stepId} failed (attempt ${step.failCount}/${MAX_STEP_FAILURES}) — will retry`);
+  }
+
+  savePlan(plan);
+}
+
+export function markStepInProgress(stepId: string): void {
+  const plan = loadCurrentPlan();
+  if (!plan) return;
+  const step = plan.steps.find(s => s.id === stepId);
+  if (step) step.status = "in_progress";
+  savePlan(plan);
+}
+
+export function cancelPlan(): void {
+  const plan = loadCurrentPlan();
+  if (!plan) return;
+  plan.status = "cancelled";
+  savePlan(plan);
+}

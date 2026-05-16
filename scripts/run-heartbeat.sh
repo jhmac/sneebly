@@ -1,0 +1,4 @@
+#!/bin/bash
+export ANTHROPIC_API_KEY="${AI_INTEGRATIONS_ANTHROPIC_API_KEY}"
+export ANTHROPIC_BASE_URL="${AI_INTEGRATIONS_ANTHROPIC_BASE_URL}"
+exec npx sneebly-heartbeat "$@"
