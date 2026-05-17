@@ -65,9 +65,9 @@ Target user experience: paste a "start cycle" prompt, walk away, return in an ho
 
 ## Active blockers / decisions pending
 
-1. **Dual codebase verdict (JS vs TS path)** — must resolve before Week 1 extraction begins. Today's Blocks 2-4 address this.
+1. **Dual codebase verdict (JS vs TS path)** — PARTIALLY RESOLVED 2026-05-17. The TS path is structurally orphaned in v2.0 main (no JS-to-TS imports, no CLI invocations, broken paths in self-modify.ts). HOWEVER, user notes the TS path may represent real self-modification capability that worked partially in AnimAItion. Investigation deferred to Week 1. See docs/sneebly-sessions/2026-05-17-execution-path-decision.md (note revision at end).
 
-2. **Auto-correction rule preservation** — if TS path (builder-agent.ts) is removed, must extract autoCorrectStep and inferRelatedFiles rules into AGENTS.md template before deleting the file. These rules are the moat.
+2. **Auto-correction rule preservation** — Required for Week 1 REGARDLESS of TS path keep/delete decision. Extract autoCorrectStep rules to AGENTS.md path_rules section AND elon-builder.md Common Path Mistakes section. Extract inferRelatedFiles patterns to AGENTS.md related_files section. These rules represent encoded wisdom that should be in declarative config either way.
 
 3. **Identity file requirement policy** — current code allows missing AGENTS.md (silent failure). v3 should fail-closed. Decision: when in extraction work to apply this fix.
 
@@ -75,6 +75,8 @@ Target user experience: paste a "start cycle" prompt, walk away, return in an ho
 
 5. **NEEDS-ATTENTION.md writer location** — orchestrator.js doesn't write it but SPEC.md describes it. Need to grep to find where it's written, or add it explicitly in v3.
 
+
+6. **Self-modification capability investigation** - added 2026-05-17. The TS path (26 files in src/) may represent a real self-improvement feature. Investigation block in Week 1 reads learning-loop.ts, self-modify.ts (full), needs-detector.ts, skill-manager.ts, progress-tracker.ts. Three outcomes: keep+integrate (plan v3.1), salvage+delete, delete+forget.
 ---
 
 ## Three guiding decisions (committed)
@@ -99,7 +101,7 @@ These shaped the v3 roadmap and should not be revisited casually:
 - Output: this file committed to v3 branch
 
 ### Block 1: Plumb housekeeping
-- Status: TODO
+- Status: DONE - May 15 commits were already pushed; SESSION-LOG corrected
 - Time: 15 min
 - Tasks:
   - cd to `~/Sneebly-V3/projects/Plumb`
@@ -108,7 +110,7 @@ These shaped the v3 roadmap and should not be revisited casually:
 - Why: clears mental overhead, easy warmup, closes yesterday's loop
 
 ### Block 2: Read src/subagents/spec-executor.js
-- Status: TODO
+- Status: DONE - read spec-executor.js (251 lines), spec-executor.md (113 lines), elon-builder.md (71 lines)
 - Time: 60-90 min
 - Tasks:
   - User pastes URL: `https://github.com/jhmac/sneebly/blob/main/src/subagents/spec-executor.js`
@@ -118,7 +120,7 @@ These shaped the v3 roadmap and should not be revisited casually:
 - Why: settles whether JS path is canonical (most likely yes); is the single most important file we haven't analyzed
 
 ### Block 3: Determine if TS path is dead code
-- Status: TODO
+- Status: DONE - cloned v2.0 main to ~/projects/sneebly-v2-readonly, ran 14 verification greps, confirmed no JS-to-TS imports and no CLI invocations of TS path
 - Time: 30-45 min
 - Tasks:
   - User pastes URL: `https://github.com/jhmac/sneebly/blob/main/src/autonomy-loop.ts`
@@ -127,7 +129,7 @@ These shaped the v3 roadmap and should not be revisited casually:
 - Why: definitive test for "TS path is dead vs alive"; resolves blocker #1 above
 
 ### Block 4: Architectural decision + session note
-- Status: TODO
+- Status: DONE WITH REVISION - committed 4ce3b1c (original decision) then eede1f3 (revision: defer deletion, add Week 1 investigation)
 - Time: 15-30 min
 - Tasks:
   - Based on Blocks 2-3, decide: JS path canonical (remove TS) OR both alive (consolidate later) OR something else
@@ -137,7 +139,7 @@ These shaped the v3 roadmap and should not be revisited casually:
 - Why: commits the decision so future sessions don't relitigate
 
 ### Block 5: Update ROADMAP.md if needed (conditional)
-- Status: TODO
+- Status: DEFERRED to next session - Week 1 scope depends on self-modification investigation outcome
 - Time: 30 min (only if needed)
 - Tasks:
   - Only execute if Block 4 surfaced something that changes the 5-week plan
