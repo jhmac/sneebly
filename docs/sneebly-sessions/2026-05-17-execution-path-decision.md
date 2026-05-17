@@ -221,3 +221,76 @@ These risks are mitigated by:
 - Testing the JS path still works after deletion (existing test command
   or smoke test)
 - The deletions are reversible via git revert if something breaks
+
+---
+
+## REVISION — 2026-05-17 (same day)
+
+After committing the original decision above, the user noted that the
+TS path represents a self-modification capability they spent real time
+on. Their honest assessment: "Maybe it worked but I'm not sure if it
+succeeded." This is meaningfully different from "this is dead code."
+
+### Revised stance
+
+DO NOT delete the TS files in Week 1. Instead, Week 1 includes an
+investigation block:
+
+1. Read 4-5 of the TS path's core files (in order):
+   - src/learning-loop.ts — likely the central self-improvement loop
+   - src/self-modify.ts — full read (we only read the top in Block 4a)
+   - src/needs-detector.ts — likely identifies what needs improving
+   - src/skill-manager.ts — likely manages skill addition
+   - src/progress-tracker.ts — tracks improvements over time
+
+2. Determine via reading:
+   - Was the feature complete or partial?
+   - What triggered self-modification (autonomous vs human-approved)?
+   - What did it actually modify (Sneebly source? Skills? Prompts?)
+   - Is the architecture sound enough to integrate into v3 or rebuild?
+
+3. After investigation, choose:
+   - **Keep + integrate**: feature is real and worth preserving.
+     Plan for v3.1 integration (not v3.0 — keep v3.0 scope tight).
+     Don't delete TS files.
+   - **Salvage patterns + delete**: feature is partial but has
+     architectural ideas worth keeping. Extract patterns to AGENTS.md
+     or new structure. Delete implementation. Plan v3.x rebuild.
+   - **Delete + forget**: feature was aspirational. Delete TS files
+     as originally planned. Move on.
+
+### Why this revision
+
+The original "delete in Week 1" decision was based on "this is dead code
+from the embedded era." The grep evidence supported that: no JS-to-TS
+imports, no CLI invocations, broken paths in self-modify.ts. But
+"structurally orphaned in v2.0 main" is not the same as "never worked
+anywhere." The feature may have worked in AnimAItion before extraction
+broke the paths.
+
+Self-modification (Sneebly improves itself) is a genuinely interesting
+capability worth more than 60 minutes of investigation before deletion.
+
+### Why we're not just porting it now
+
+Three reasons:
+- v3.0 scope should stay tight (4-6 weeks). Adding self-modification
+  could blow that to 8-10 weeks.
+- Self-modification is risky for an autonomous system (it can corrupt
+  itself in ways human-supervised systems can't). v3.0 should prove
+  the foundation works first.
+- We don't yet know if the original implementation is sound enough to
+  port or whether a rebuild is needed.
+
+### Status of the rule-extraction plan
+
+Still required. `autoCorrectStep` rules from builder-agent.ts and
+`inferRelatedFiles` patterns are still worth extracting to AGENTS.md
+even if we keep the TS files temporarily. The extraction happens during
+Week 1. Whether we delete TS files happens based on Week 1 investigation
+outcome.
+
+### Updated open question
+
+The "investigate self-modification capability" task becomes part of
+Week 1. Add to ROADMAP.md.
