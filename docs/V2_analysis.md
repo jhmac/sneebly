@@ -882,3 +882,176 @@ TS-path supporting files NOT READ:
 These are referenced by builder-agent.ts. Need to be read to understand
 TS path fully, but only matters if Week 1 decides TS path is canonical.
 
+
+---
+
+## ADDITIONS — 2026-05-17
+
+Three files read during Block 2 of 2026-05-17, plus a discovered file (safety.js) that should have been in Block 2a but was missed.
+
+---
+
+## src/subagents/spec-executor.js (251 lines, 9.43KB)
+
+**Purpose:** The JS-path's executor "glue" — much thinner than the TS path's builder-agent.ts. Wraps delegateToSubagent('spec-executor', ...) from dispatcher.js with code-loading and response-normalization. The actual code generation happens via the subagent definition at templates/subagents/spec-executor.md. This file is glue; the engine is the prompt + dispatcher.
+
+**Key mechanisms:**
+- _findRelevantSection(full, spec, windowBefore=60, windowAfter=80): intelligent extraction of relevant code from large files. Three strategies in order:
+  - If spec.relevantCode matches text in file, return +/-60-80 lines around it
+  - Else identify meaningful identifiers from spec.description + successCriteria, filter 50+ stop words, score lines by identifier-frequency match, return best window
+  - Else if filePath includes "route", find first Express route definition and use that
+  - Cap at 20000 chars
+- _extractImports(code): two regexes (from '...' and require('...')). Keeps only relative (.) and aliased (@/, @shared/) imports.
+- _resolveImportPath(importPath, filePath, projectRoot): resolves @shared/ -> shared/, @/ -> client/src/, ./ -> resolved. Tries 8 extensions (.ts, .tsx, .js, .jsx) plus /index.ts/tsx/js for directory imports. AnimAItion-specific aliases.
+- _gatherRelatedContext(): for each imported file, reads it, truncates to 2000 chars, prefixes with comment. Also includes spec.relatedFiles. Capped at 6000 chars total.
+- SPEC_COMPLETE_SIGNALS: 7 regexes for natural-language detection ("criteria are met", "no changes needed", "already implemented", "SPEC_COMPLETE").
+- _normalizeResponse(result): validates and shapes dispatcher response into one of four canonical statuses (change/create/multi-change/multi-create). Returns null for anything else (caller defaults to stuck).
+- executeSpec(spec, options): main entry. Load file content -> use _findRelevantSection for large files -> gather related context via imports + spec.relatedFiles -> build task payload with iteration history (last 3) + retry-guidance text -> call dispatcher -> translate response.
+
+**What this file does NOT contain (compared to builder-agent.ts):**
+- No auto-correction rules. No autoCorrectStep-equivalent. Path routing happens elsewhere (likely in elon-builder, but also not there per Block 3 finding).
+- No related-files INFERENCE from description patterns. Uses imports + explicit spec.relatedFiles instead.
+- No TS error fix loop. That happens in Ralph Loop's _validateAndRollback.
+- No effort escalation. Single call to dispatcher.
+- No model selection. Subagent definition's YAML chooses the model.
+
+**AnimAItion couplings:**
+- @shared/ and @/ alias resolution (same as dependency-index.js)
+- Express route patterns in fallback section detection
+
+**v3 plan:**
+- KEEP VERBATIM: overall flow, _findRelevantSection identifier-scoring approach, _gatherRelatedContext pattern, _normalizeResponse strict validation, iteration history slicing (last 3).
+- MODIFY: alias resolution should read from tsconfig.json paths; file-extension list should be configurable.
+- ADD: extract _findRelevantSection as standalone utility (potentially reusable).
+
+**Verdict:** Keep verbatim with light modifications. This is high-quality glue code. The intelligent section extraction is genuinely clever.
+
+---
+
+## templates/subagents/spec-executor.md (113 lines, 6.12KB)
+
+**Purpose:** System prompt that defines spec-executor's behavior. Together with spec-executor.js, this IS the canonical builder in the JS path. Model: Sonnet (cost-effective for bounded execution).
+
+**Key mechanisms:**
+- Three-step process per iteration: read spec -> read current file -> check each success criterion. If all met -> SPEC_COMPLETE. If not -> make change toward most important unmet criterion.
+- Four response statuses defined: change (single-file), multi-change (atomic), create (new file), multi-create (multiple new files). Matches what _normalizeResponse validates.
+- Multi-change atomic warning: "Use ONLY when changes are interdependent and would break the app if applied individually." Encourages caution.
+- 12 file-creation rules with concrete examples:
+  - Complete runnable content (no placeholders, no TODOs)
+  - Match EXACT import style of existing files (example: import { x } from '@/lib/y' vs const x = require('./y'))
+  - Match exact code style (semicolons, quotes, spacing)
+  - Include all imports
+  - Proper error handling on async ops
+  - TypeScript types if project uses TS
+  - Follow exact pattern of existing route/service/schema files
+- Runtime validation explanation: syntax check + health check + test command will run after; "your changes are safe to be aggressive."
+- Retry awareness with five failure modes:
+  - parse-failed / unrecognized-response -> output ONLY JSON
+  - fuzzy / match -> oldCode wasn't exact
+  - test-failed -> change broke tests, try smaller
+  - runtime-failed -> change crashed app, be conservative
+  - create-failed -> file creation failed
+- "NEVER repeat the same change that already failed" explicit guard
+- oldCode rules: EXACT substring (character-for-character including whitespace), 3-5 lines context for uniqueness, minimal changes (no refactoring)
+- "Output ONLY the JSON response object" emphasized multiple times
+
+**CRITICAL FINDING from this read:**
+The path-routing rules from builder-agent.ts's autoCorrectStep are NOT in this prompt. The prompt focuses on EXECUTION (how to format response, how to handle retries, how to do atomic multi-file) but NOT on path routing. This means the AnimAItion-specific path rules are NOT inherited by the JS-path executor; they live in the TS path only.
+
+**AnimAItion couplings:** None directly. The prompt is project-agnostic except in implicit assumptions ("look at existing route files" assumes the project has them).
+
+**v3 plan:**
+- KEEP VERBATIM: whole prompt structure, three-step process, four response statuses with examples, multi-change warning, 12 file-creation rules, retry awareness, oldCode exact-substring requirement, "output ONLY JSON" emphasis.
+- MODIFY: add a section about project conventions referencing AGENTS.md path_rules. For greenfield projects (no existing patterns to match), reference SETUP.md/AGENTS.md conventions instead.
+
+**Open question — model choice:** Currently Sonnet. For v3 with Opus 4.7 available, consider: spec execution is well-bounded (read spec, read file, output JSON change). Opus would be overkill for most spec executions. Keep Sonnet for spec-executor; reserve Opus for planners (elon-builder, elon-evaluator). Matches v2.0's tiering (Haiku for cheap eval, Sonnet for execution, Opus for planning).
+
+**Verdict:** Keep verbatim with one addition (section about project conventions referencing AGENTS.md). Excellent prompt engineering.
+
+---
+
+## templates/subagents/elon-builder.md (71 lines, 2.91KB)
+
+**Purpose:** Build-mode constraint identifier. Reads app spec and phased roadmap, examines existing codebase, identifies THE SINGLE NEXT THING that should be built to make progress toward current milestone. Returns a plan (1-5 specs) that ELON's _createSpecsFromPlan turns into approved-queue JSON files. Model: Sonnet (costEstimate $0.02).
+
+**Key mechanisms:**
+- 8 explicit rules:
+  - ONE constraint at a time. ONE specific buildable thing.
+  - Current phase only. Never skip ahead.
+  - Check what exists. If file/endpoint already exists, don't rebuild.
+  - Respect dependency order.
+  - Small specs. 1-5 specs per constraint.
+  - Surgical and specific. "Create server/routes/users.ts with CRUD" not "Build the backend."
+  - Success criteria must be verifiable (file existence, HTTP response).
+  - Never touch protected files (identity files, .env, package.json, auth code).
+- Dependency order (8 levels): schema -> shared types -> services -> routes -> client hooks -> UI -> integrations -> polish
+- Output format: structured JSON with constraint, reason, phase, milestone, dependencyChain, existingContext, plan[] of steps, verificationPages, estimatedSpecs, buildNotes
+- Each step has: step number, action (create/modify), filePath, description (referencing existing patterns), successCriteria, relatedFiles, dependsOn, testCommand
+- Special return values: PHASE_COMPLETE (all milestones done), BLOCKED (requires human action)
+
+**CRITICAL FINDING from this read:**
+The path-routing rules from builder-agent.ts's autoCorrectStep are NOT in this prompt either. What IS here is a dependency order (build schema before services before routes etc.) but NOT "schema goes in shared/schema.ts." The path-routing intelligence in v2.0 comes from THREE places:
+1. builder-agent.ts autoCorrectStep (TS path) — explicit redirect rules
+2. The codebase itself (LLM told to "match existing patterns")
+3. The spec author (elon-builder generates the spec with filePath; that filePath comes from LLM trying to match conventions)
+
+The JS path expects elon-builder to get filePaths right the FIRST time. There's no auto-correction safety net.
+
+**AnimAItion couplings:**
+- Output format example uses /api/resource and curl http://localhost:5000 (Replit defaults)
+- "server/routes/users.ts" as example filePath (Express convention)
+- All examples are AnimAItion-shaped paths
+
+**v3 plan:**
+- KEEP VERBATIM: 8 rules, dependency order, output format structure, PHASE_COMPLETE and BLOCKED special returns.
+- MODIFY:
+  - Add a "Common Path Mistakes" section with the rules extracted from builder-agent.ts autoCorrectStep
+  - Replace AnimAItion-specific examples with placeholders that reference AGENTS.md
+  - Add explicit instruction: "Consult AGENTS.md path_rules section for project-specific path conventions"
+- ADD: section about handling new file creation when no existing patterns exist (greenfield projects).
+
+**Verdict:** Keep with two specific additions (path mistakes section, AGENTS.md reference). This is one of the highest-value subagent prompts — it generates the specs that drive the entire build loop.
+
+---
+
+## src/safety.js (113 lines)
+
+**Purpose:** The JS-path's isPathSafe() implementation. Imports IDENTITY_FILES from security.js. Parses AGENTS.md "Safe Paths" and "Protected Paths" sections. Used by code-engine.js's _checkSafety() triple-gate. NOT to be confused with src/path-safety.ts (TS-path duplicate, to be deleted).
+
+**Key mechanisms (from head -30 viewing):**
+- isPathSafe(filePath, agentsContext): main entry. Triple-gate:
+  - Path validation (not empty, not invalid)
+  - Path traversal block (no '..')
+  - Identity file check (against IDENTITY_FILES list)
+  - Parses AGENTS.md sections for Safe Paths and Protected Paths
+  - Globbing match against patterns
+- _parseAgentsSections(agentsContext): extracts patterns from AGENTS.md markdown
+- _matchGlob(path, pattern): glob matching for path patterns
+
+**Was missed in Block 2a analysis.** Discovered only during Block 4a verification work when realizing IDENTITY_FILES import existed. This file is load-bearing — code-engine.js's safety check delegates to it.
+
+**AnimAItion couplings:** None visible from head — the file is intentionally project-agnostic (parses AGENTS.md which is project-specific).
+
+**v3 plan:**
+- KEEP VERBATIM: the whole file (only the top 30 lines have been read, but the design pattern is sound).
+- NEEDS FULL READ: in next session or during Week 1 extraction, read all 113 lines to confirm no AnimAItion couplings hide in the glob matching or section parsing.
+
+**Verdict:** Keep, full read pending. This is the JS-path's path-safety implementation that the TS-path's path-safety.ts duplicates with different semantics. When TS path is deleted, safety.js stays.
+
+---
+
+## Summary of 2026-05-17 reading
+
+Three files plus one discovery:
+- spec-executor.js: 251 lines, glue layer for JS-path execution
+- spec-executor.md: 113 lines, the system prompt that IS the executor
+- elon-builder.md: 71 lines, the build-mode planner prompt
+- safety.js: 113 lines, discovered during verification (needs full read later)
+
+**Key cross-file finding:** The path-routing rules from builder-agent.ts's autoCorrectStep exist ONLY in the TS path. The JS path's elon-builder prompt has dependency order but not explicit path rules. The spec-executor prompt has no path routing at all. This means:
+1. If we delete the TS path, those rules are lost unless extracted
+2. Extraction must happen during Week 1
+3. Two homes: AGENTS.md template (project-specific) and elon-builder.md (generic path mistakes)
+
+This analysis informed the Block 4 decision (committed as 4ce3b1c and revised in eede1f3).
+
