@@ -57,8 +57,8 @@ Target user experience: paste a "start cycle" prompt, walk away, return in an ho
 - Yesterday's error-ledger design is superseded by regression-tracker.js (already in v2.0)
 
 **Plumb state:**
-- 3 unpushed commits in `~/Sneebly-V3/projects/Plumb/` from May 15 (test file, gitignore, session note)
-- Local environment has known broken state (drizzle-kit esbuild mismatch never resolved)
+- All May 15 commits pushed (test file, gitignore, session note already at origin/main, HEAD `7567db2`)
+- Local environment has known broken state (drizzle-kit esbuild mismatch never resolved — will need SETUP.md when Plumb stress-test time comes)
 - Plumb is NOT the current focus — addressed via planned "Sneebly first, Plumb later" decision
 
 ---
