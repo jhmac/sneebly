@@ -146,6 +146,15 @@ These shaped the v3 roadmap and should not be revisited casually:
   - If skipping, mark "N/A" and note why
 - Why: keep ROADMAP.md as the canonical strategic doc
 
+### Block A: Self-modification investigation (added mid-session)
+- Status: IN PROGRESS
+- Time: 60-90 min
+- Tasks:
+  - Read 5 TS files in order: learning-loop.ts, self-modify.ts (full), needs-detector.ts, skill-manager.ts, progress-tracker.ts
+  - Per file: purpose, mechanisms, completeness, AnimAItion couplings
+  - Decide outcome: keep+integrate (plan v3.1), salvage+delete, delete+forget
+- Why: blocker #6 resolution; decides whether self-modification is real feature or pipe dream
+
 ### End-of-day: Update this SESSION-LOG.md
 - Append "what got done" to today's session
 - Update "Current state" section if state changed
