@@ -1720,3 +1720,198 @@ utils, identity, cost-tracker, memory-manager, anthropic-client, verify-agent, b
 **v3.0 total: 14 ported files + 2 new files + enhancements (~4,500-5,000 lines TS → JS work)**
 
 That's ~5x larger than Block A's estimate. Realistic v3.0 timeline: 5-7 weeks of focused port work.
+
+---
+
+## Block B Files 13-20: Final batch
+
+## File 13: src/progress-tracker.ts (242 lines)
+Reconciles GOALS.md against codebase state. Checks: schema (table in schema.ts), storage (CRUD methods), routes (regex 3-fallback), pages (filename match). Writes report to .sneebly/progress.json AND updates MEMORY.md "Project State" section. Includes markGoalComplete that mutates GOALS.md directly (changing [ ] to [x]).
+
+AnimAItion-specific: hardcoded uiPages list (Dashboard/ProjectDetail/CharacterEditor/SpritePreview/EnvironmentEditor). For v3: parameterize via AGENTS.md.
+
+Three-regex route matching is good defensive engineering — handles different LLM route declaration styles.
+
+Port to v3.0 as src/progress-tracker.js. Make uiPages config-driven. Decide GOALS.md mutation policy.
+
+## File 14: src/spec-watcher.ts (109 lines)
+Tiny background daemon. Polls .sneebly/blocked/, .sneebly/failed/, .sneebly/failed-queue/ every 10s for new spec files. Calls onSpecBlocked from spec-monitor when found. Also greps today's daily log for blocked patterns.
+
+Different from spec-validator's watcher (which watches queue/pending/ for new specs to validate). Two watchers, two purposes.
+
+Port to v3.0, merge with spec-monitor.ts.
+
+## File 15: src/spec-monitor.ts (387 lines)
+Blocker management. When spec fails repeatedly, creates blocker record with categorized user instructions and skill suggestions. Includes deduplication, AnimAItion-specific wrong-path auto-resolution, integration with sneebly-hooks (admin alerts) + needs-detector (NEEDS-ATTENTION.md).
+
+Five categories: database-migration, database-schema, permissions, code-syntax, test-failure, unknown. Each generates Replit-shaped user instructions.
+
+Wrong-path auto-resolution: detects targeting wrong paths (/types/, /models/, server/db.ts, etc.) + if work already exists in schema.ts → silently resolve. Never bothers human about wrong-path mistakes.
+
+Skill keyword matching: scans .sneebly/skills/*.md for keywords matching the failure. Returns user instructions from skill if relevant.
+
+Triple integration when blocker created: blockers.json + addHumanTestAlert + detectNeed.
+
+This is path-rules layer 4 (post-execution-failure). Four layers total: planner-agent (preventive), builder-agent autoCorrectStep (corrective), spec-validator (corrective), spec-monitor (auto-resolution).
+
+Port to v3.0. Replace Replit-Agent instructions with v3-appropriate prompts. Wrong-path rules → AGENTS.md driven.
+
+## File 16: src/sneebly-hooks.ts (212 lines)
+Two features:
+1. stampMarkdownChangelog: when ELON approves a spec affecting an identity .md file, stamps a changelog entry. Tracked files: GOALS, SOUL, IDENTITY, USER, TOOLS, HEARTBEAT, SPEC_ROADMAP.
+2. Human testing alerts queue (HumanTestAlert): persistent .sneebly/human-testing.json, severity levels (critical/high/medium/low), 100-entry cap, dedup on (feature + category).
+
+Confirmed 7-8 canonical .md files for Sneebly: SOUL, IDENTITY, AGENTS, TOOLS, HEARTBEAT, USER, GOALS, SPEC_ROADMAP. These form the v3 configuration surface.
+
+Async observation pattern: hooks run side effects, don't block main flow.
+
+Port to v3.0 as src/sneebly-hooks.js.
+
+## File 17: src/sync-from-github.ts (102 lines)
+One-off maintenance script. Pulls latest Sneebly source from github.com/jhmac/sneebly via Replit Connectors API. Maps src/X.ts → server/X.ts (because embedded Sneebly lives in server/).
+
+This was AnimAItion's mechanism to keep its embedded Sneebly up-to-date with the standalone main repo. Heavily Replit-coupled (REPLIT_CONNECTORS_HOSTNAME, REPL_IDENTITY).
+
+For v3: SKIP. v3 IS the canonical source. No embedded copy needs sync. If user wants updates, `git pull` like any normal repo.
+
+Smoking gun confirming the embedded-vs-standalone architecture of v2.0.
+
+## File 18: src/auto-db-push.ts (83 lines)
+fs.watch on shared/schema.ts. On change, runs `npm run db:push` with hash-debounce. 2-second debounce to avoid editor-save burst.
+
+Heavily AnimAItion-coupled: hardcoded path, hardcoded Drizzle command, assumes Postgres push workflow.
+
+Risk: auto-execution modifies production DB. No "review changes" gate.
+
+Port to v3.0 with config-driven path (AGENTS.md schema_file + db_command). Optional: dev-mode-only check, dry-run first.
+
+## File 19: src/command-center.ts (1226 lines, 62.8 KB)
+LARGEST file in entire investigation. Returns HTML/CSS/JS as a template string for the Sneebly admin dashboard. Self-contained single-page app.
+
+Dashboard cards: ELON Status, Autonomy System, AI Cost Tracking, Auto-Approval Settings, Skills Manager, Blocker Alerts, Sneebly Needs Help, Human Testing Required, Activity Timeline, MD File Changelogs.
+
+Calls 15+ APIs across /api/sneebly/* and /api/sneebly-cc/*. Polls for live updates.
+
+UI language Replit-coupled: "Copy this prompt into Replit Agent" everywhere. Needs find/replace for v3.
+
+DEFER TO v3.1. v3.0 ships faster with CLI (sneebly status, costs, blockers, needs, autonomy). Dashboard becomes v3.1 priority.
+
+When porting:
+- Direct text replace approach: 2-3 days
+- Modern rewrite (React/Vite): 5-7 days
+- v3 also needs Express routes for the dashboard APIs
+- Recommendation: Option A (direct port), then iterate
+
+## File 20: src/logging.ts (124 lines)
+Express middleware for request + error logging. Three features:
+- requestLogger: wraps res.end, logs to .sneebly/request-log.jsonl
+- errorLogger: Express error middleware, logs to .sneebly/error-log.jsonl
+- setupProcessErrorHandlers: catches uncaughtException + unhandledRejection
+
+Secret sanitization regex strips sk-/pk_/key_/token_/Bearer + password/secret/apikey patterns. MD5 12-char signature for error fingerprinting/deduplication.
+
+Production-grade. Port to v3.0 as src/logging.js.
+
+## File 21: src/path-safety.ts (44 lines)
+Smallest decision-relevant file. Three functions:
+- resolveAndValidate: rejects path traversal, handles symlinks via realpathSync on parent dir
+- matchesPathList: simple glob (handles /** and /* as prefix match, no recursive globs)
+- isPathSafe: deny-by-default. Rejects neverTouch matches, accepts safePaths matches, denies everything else.
+
+44 lines is the foundation of v2.0's safety. Every file write goes through this.
+
+Cleaner architecture than JS-path's safety.js: identity.ts parses once, path-safety.ts validates against typed arrays. JS path parses on every call.
+
+Port to v3.0 as src/path-safety.js. Merge with or replace JS-path safety.js. Consider upgrading matchesPathList to minimatch for richer globs.
+
+## BLOCK B COMPLETE — Final v3.0 port list
+
+20 ported files + 2 new files + enhancements.
+
+### Feature layer (6 files from Block A)
+1. self-modify.ts → src/self-modify.js
+2. auto-fixer.ts → src/auto-fixer.js
+3. needs-detector.ts → src/needs-detector.js
+4. learning-loop.ts → src/learning-loop.js
+5. spec-validator.ts → src/spec-validator.js
+6. acceptance-test-generator.ts → src/acceptance-test-generator.js
+
+### Infrastructure layer (11 files from Block B)
+7. utils.ts → src/utils.js (budget → rate-limit check)
+8. identity.ts → src/identity.js (THE config parser)
+9. cost-tracker.ts → src/usage-tracker.js (transform: drop dollars, keep observability)
+10. memory-manager.ts → src/memory-manager.js (add pruning)
+11. anthropic-client.ts (5-line env var change)
+12. claude-session.ts → src/claude-session.js (multi-turn capability)
+13. shell-executor.ts → src/shell-executor.js (merge with safety.js's CommandValidator)
+14. progress-tracker.ts → src/progress-tracker.js (uiPages config-driven)
+15. auto-db-push.ts → src/auto-db-push.js (config-driven)
+16. logging.ts → src/logging.js
+17. path-safety.ts → src/path-safety.js (merge with safety.js)
+
+### Extension layer (3 files)
+18. skill-manager.ts → src/skill-manager.js (plugin/marketplace, AI-vetted)
+19. spec-monitor.ts + spec-watcher.ts → src/spec-monitor.js (merged)
+20. sneebly-hooks.ts → src/sneebly-hooks.js
+
+### New files from extracts (2)
+21. src/plan-reviewer.js (from autonomy-loop.ts opusReviewPlan + autoRefactor patterns)
+22. src/session-journal.js (from autonomy-loop.ts session journal patterns)
+
+### Selective enhancements to existing JS files
+- From verify-agent.ts: stripStringsAndComments + checkFileSyntax + TS-modified-only filter → src/utils.js + src/code-engine.js
+- From builder-agent.ts: autoCorrectStep + inferRelatedFiles + TSC fix loop → src/subagents/spec-executor.js
+- From autonomy-loop.ts: rate limiting + auto-pause + clean state API → src/orchestrator.js
+
+### Don't port
+- sync-from-github.ts (obsolete Replit script)
+- planner-agent.ts (rules → AGENTS.md path_rules)
+- autonomy-loop.ts (patterns extracted)
+- builder-agent.ts (patterns extracted)
+- verify-agent.ts (patterns extracted)
+- roadmap-orchestrator.ts (duplicates ELON)
+- rollback.ts (JS path has equivalent)
+- ground-truth-builder.ts (Postgres-coupled, defer)
+
+### Deferred to v3.1
+- command-center.ts (1226 lines admin dashboard)
+- experiment-runner.ts + experiment-metrics.ts (A/B experimentation)
+- auto-research.ts + knowledge-base.ts (convention synthesis)
+
+### v3.0 estimate
+- 20 ported files
+- 2 new files
+- ~4,500-5,500 lines TS → JS work
+- 5-7 weeks of focused porting
+- Selective enhancements to ~3 existing JS files
+
+That's 3-4x larger than Block A's initial estimate. But also more accurate. The investigation prevented planning a port that would have shipped missing 70% of v2.0's working capability.
+
+## Cumulative findings across Block A + Block B
+
+**v2.0 capability summary:**
+- Per-step build + verify + rollback (basic autonomous loop)
+- Plan-completion holistic review + auto-refactor (quality pass)
+- Multi-timescale learning (short failure context + long MEMORY.md)
+- Plugin/marketplace skill installation with AI security vetting
+- Multi-turn persistent sessions
+- Path-routing at 4 layers
+- Persistent state across restarts (10+ files in .sneebly/)
+- Dashboard-friendly state API
+- Production-grade logging with secret sanitization
+- Production-grade shell execution (25+ blocklist patterns)
+- Rich admin dashboard
+- Acceptance test generation (TDD for slice cycle)
+- A/B experimentation with rollback
+- Convention synthesis
+
+**v3.0 inheriting all of this:**
+- Operates at fraction of v2.0's cost (Claude Max flat-rate)
+- Mac mini-native (no Replit coupling)
+- Same architecture, relaxed cost discipline
+- Better models throughout (Opus 4.7 default)
+- 5-7 weeks of porting work
+
+Block B is COMPLETE. Block A → Block B revealed Block A's port plan was a ~3x undercount. Block B's plan is realistic.
+
+Ready for Week 1 extraction work.
