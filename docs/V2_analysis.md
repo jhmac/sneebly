@@ -1541,3 +1541,182 @@ This pattern should generalize in v3 to: AGENTS.md changes, new skill installati
 - TSC-modified-only filtering wisdom
 
 These should make their way into ROADMAP.md when we update Week 1 scope.
+
+---
+
+## Block B File 11: src/autonomy-loop.ts (672 lines, 23.9 KB)
+
+**Purpose:** Complete autonomous build loop. Plans → builds → verifies → reviews → refactors → learns. Has cycle management, rate limiting, error escalation, plan review with Opus, auto-refactor on review failures, journal persistence. **THE missing autonomous orchestrator.**
+
+**Earlier Block A dismissal was wrong on this file too.** Has capabilities the JS path lacks.
+
+**Cycle workflow:**
+1. Check paused, budget, max cycles (50/session), rate limit (120s min)
+2. Health check server, fail if unhealthy
+3. Load or generate plan (Opus via planner-agent)
+4. Get next step
+5. If plan complete → **Opus reviews ALL modified files** + auto-refactor if issues + verify + rollback if still broken + write summary
+6. Else execute step via builder-agent (Opus)
+7. Quick verify (tsc + syntax) → rollback if fails
+8. Health check after step → rollback if unhealthy
+9. Every 5 successes → runLearningCycle()
+
+**Critical unique features:**
+
+1. **Two-pass build model:**
+   - Pass 1 (per-step): Builder-agent does the work
+   - Pass 2 (per-plan): Opus reviews ALL files modified holistically, auto-refactor if issues found
+   - JS path is one-pass only — this is real quality improvement
+   - opusReviewPlan() checks: TS errors, dead code, error handling, pattern inconsistency, security
+   - autoRefactor() applies fixes with rollback if verify fails
+
+2. **Session journal with 200-entry pruning:**
+   - Persistent .sneebly/session-journal.json
+   - Per-entry: cycle, result, files, error, cost, usedOpus, verificationPassed
+   - Overflow archived to .sneebly/daily/<date>-journal.jsonl
+   - Read by planner-agent.getRecentJournalEntries — feedback loop
+
+3. **Failure context propagation:**
+   - getRecentFailureContext returns last 3 failures formatted for prompt
+   - Appended to next plan's prompt: "avoid repeating these mistakes"
+   - SHORT-term version of learning-loop's pattern extraction
+   - Two timescales: short (cycle-to-cycle) + long (across sessions via MEMORY.md)
+
+4. **Rate limiting and auto-pause:**
+   - MIN_CYCLE_INTERVAL_MS = 120000 (2 min)
+   - MAX_CYCLES_PER_SESSION = 50
+   - MAX_ERRORS_BEFORE_PAUSE = 5
+   - MAX_ERRORS_STORED = 50
+
+5. **Triple rollback safety:**
+   - After step build fails with partial changes
+   - After step verify fails
+   - After post-step health check fails
+   - Plus 4th rollback in refactor path
+
+6. **Clean exported state API:**
+   - startAutonomyLoop / stopAutonomyLoop / pauseAutonomyLoop / resumeAutonomyLoop
+   - triggerSingleCycle (manual cycle)
+   - getAutonomyState / getSessionJournal / getRecentJournalEntries
+
+**Cadence model for v3:**
+v2.0 ran 2-minute cycles. v3 wants 1-2 hour cycles. Just config change: MIN_CYCLE_INTERVAL_MS to 3600000-7200000. Architecture supports it.
+
+**Plan-complete-reviewed as natural human checkpoint:**
+After plan-complete-reviewed, loop continues but next cycle generates new plan. v3 should PAUSE here for human approval — natural 1-2 hour check-in point.
+
+**NEEDS-ATTENTION.md writers (multiple):**
+- needs-detector.ts: writes when human action needed (db push, npm install)
+- autonomy-loop's writeNeedsAttention(): writes per-cycle failures
+- autonomy-loop's writePlanReviewSummary(): writes plan completion summaries
+- Three writers, one file — v3 needs consolidation strategy
+
+**For v3:** Don't port as a file. Extract specific patterns:
+1. Plan reviewer (~150 lines) → src/plan-reviewer.js (NEW)
+2. Auto-refactor (~80 lines) → enhance ralph-loop.js
+3. Session journal (~80 lines) → src/session-journal.js (NEW)
+4. Rate limiting / auto-pause / state API → enhance orchestrator.js
+5. Two-pass build model → architectural pattern
+
+The plan reviewer alone is genuinely valuable — building one feature across multiple specs can produce inconsistencies that per-step verification misses. Holistic review at plan boundary catches them.
+
+## Block B File 12: src/shell-executor.ts (263 lines, 6.75 KB)
+
+**Purpose:** Safe shell command execution. Three-layer defense: blocklist regex + allowlist prefix match + path safety for file-mutating commands. Logs every command to JSONL. Used by builder-agent and auto-fixer.
+
+**Three-layer security architecture:**
+
+**Layer 1: BLOCKED_PATTERNS (regex blocklist) — 25+ patterns:**
+- Catastrophic deletion: rm -rf, rm -r /, rm --no-preserve-root, rm -rf /
+- Git destruction: git push --force, git reset --hard, git clean -fd
+- DB destruction: DROP TABLE/DATABASE/SCHEMA, TRUNCATE TABLE, bare DELETE FROM
+- RCE: curl|bash, wget|sh
+- Privilege escalation: sudo, chmod 777, pkill, kill -9, shutdown, reboot
+- Low-level device: mkfs, dd if=, > /dev/
+- Mistakes: npm publish, npm install -g/--global
+- Chaining: &&, |bash|sh|node|python, ;rm/curl/wget/node
+
+Each pattern represents either a known attack or a real failure mode v2.0 experienced.
+
+**Layer 2: ALLOWED_PREFIXES (allowlist) — 40+ prefixes:**
+- Drizzle ORM: drizzle-kit push/generate/migrate/check/studio
+- TS: npx tsc --noEmit, tsc --noEmit, npx tsc -p
+- npm: npm run, npm test, npm ls, npm install, npm uninstall
+- Linting: eslint, prettier
+- Read: cat, ls, head, tail, wc, grep, find, echo, pwd, which
+- File mutation: mkdir, cp, mv, touch
+- Text: diff, sort, uniq, sed, awk
+- Git read-only: status, diff, log, show
+
+Command must START with one of these. No suffix wildcards.
+
+**Layer 3: SAFE_NPM_SCRIPTS sub-allowlist (15 entries):**
+build, check, lint, dev, start, test, typecheck, format, db:push/generate/migrate/studio/check, preview, clean
+
+Project-specific scripts like "npm run deploy" need explicit addition.
+
+**Layer 4: Path safety for file-mutating commands:**
+mkdir/cp/mv/touch get extra check. Path args extracted and checked against AGENTS.md Safe Paths / NEVER Auto-Modify lists. Even allowed commands can't mutate protected paths.
+
+**Key mechanisms:**
+- isCommandAllowed: 4 checks (blocklist, allowlist, npm script, path safety)
+- runShellCommand: exec with 30s timeout, 100KB buffer cap
+- Logs to .sneebly/shell-log.jsonl with stdout/stderr preview (first 500 chars)
+- addAllowedPrefix: runtime extension (in-memory only)
+- getShellLog: returns last N entries
+
+**For v3:** Port to src/shell-executor.js. Three options:
+- Replace JS-path security.js's CommandValidator entirely
+- Merge best of both into unified shell-executor
+- Keep both, route shell commands through shell-executor.js
+
+My recommendation: merge into shell-executor.js, deprecate security.js's CommandValidator. v3 should have ONE shell executor.
+
+**Enhancement for v3:**
+- Make ALLOWED_PREFIXES and SAFE_NPM_SCRIPTS configurable via AGENTS.md
+- Persist addAllowedPrefix() calls (currently in-memory only)
+- The 25+ blocklist patterns are irreplaceable — port verbatim
+
+## Block B status: 12 of ~18 read
+
+**Files read in Block B so far (12):**
+utils, identity, cost-tracker, memory-manager, anthropic-client, verify-agent, builder-agent, claude-session, skill-manager, autonomy-loop, shell-executor (+1 from earlier list)
+
+**Unread remaining (~7):**
+- progress-tracker.ts (completion %)
+- spec-watcher.ts (file watcher)
+- spec-monitor.ts (active blocker count)
+- sneebly-hooks.ts (lifecycle hooks)
+- sync-from-github.ts (git integration)
+- auto-db-push.ts (DB migration trigger)
+- command-center.ts (admin/CLI?)
+- logging.ts (logger)
+- path-safety.ts (TS-path safety primitive)
+
+## Updated v3.0 port list (post-12-files)
+
+**Feature layer (6 files from Block A):** unchanged
+
+**Infrastructure layer (7 files from Block B):**
+1. utils.ts → src/utils.js
+2. identity.ts → src/identity.js
+3. cost-tracker.ts → src/usage-tracker.js (transform)
+4. memory-manager.ts → src/memory-manager.js
+5. anthropic-client.ts (5 lines)
+6. claude-session.ts → src/claude-session.js
+7. **shell-executor.ts → src/shell-executor.js** (NEW)
+
+**Extension layer (1 file):** skill-manager.ts
+
+**NEW files from autonomy-loop extracts (2):**
+- src/plan-reviewer.js
+- src/session-journal.js
+
+**Enhancement extracts to existing JS files:**
+- From verify-agent.ts: stripStringsAndComments + checkFileSyntax + TS-modified-only filter
+- From builder-agent.ts: autoCorrectStep + inferRelatedFiles + TSC fix loop
+- From autonomy-loop.ts: rate limiting + auto-pause + clean state API
+
+**v3.0 total: 14 ported files + 2 new files + enhancements (~4,500-5,000 lines TS → JS work)**
+
+That's ~5x larger than Block A's estimate. Realistic v3.0 timeline: 5-7 weeks of focused port work.
