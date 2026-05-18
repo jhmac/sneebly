@@ -1258,3 +1258,286 @@ Files not yet read (~12-15 remaining):
 - path-safety.ts, shell-executor.ts (TS-path security primitives)
 
 **Reading approach:** Continue triaged reading. Highest priority: builder-agent.ts (verify Block A dismissal claim), skill-manager.ts (convention surface), claude-session.ts (API call layer completion).
+
+---
+
+## Block B File 7: src/verify-agent.ts (355 lines, 10.8 KB)
+
+**Purpose:** Post-modification verification suite. Six check types: server health, file existence, file content, syntax balance, TypeScript compilation, browser smoke test. Returns structured VerificationReport.
+
+**Key mechanisms:**
+- checkServerHealth — httpGet /health, expect 200
+- checkApiEndpoint — 200 OR 401/403 (auth-protected also passes)
+- checkFileExists — fs.existsSync
+- checkFileContains — file content includes expected string (used for "does schema.ts have pgTable?")
+- checkFileSyntax — bracket balance after stripStringsAndComments
+- checkTypeScript — npx tsc --noEmit, filters output to MODIFIED files only
+- browserSmokeCheck — playwright-core headless, console errors, body text check
+
+**Three exported functions:**
+- verifyChanges (full suite) — heavy, used after each plan step
+- quickStepVerify (file + syntax + tsc) — medium, between steps
+- quickHealthCheck (just /health ping) — fastest, used by self-modify
+
+**CRITICAL FINDINGS:**
+
+1. stripStringsAndComments is a reusable poor-man's-lexer (~50 lines). Handles line comments, block comments, template literals with nested ${}, single/double quotes with \ escapes. Extract as v3 shared utility.
+
+2. TS-modified-files-only filter (line 244): tsc output filtered to only show errors in files we just modified. Prevents pre-existing tech debt from blocking new changes. Hard-won wisdom.
+
+3. AnimAItion content checks hardcoded: pgTable, createInsertSchema, IStorage, DatabaseStorage, requireAuth. For v3 these become AGENTS.md content_checks declarative config.
+
+4. Browser smoke check fails-with-skip if Playwright unavailable.
+
+**For v3:** Selective extraction, NOT full port:
+- stripStringsAndComments → src/utils.js shared util
+- checkFileSyntax pattern → enhance src/code-engine.js verification
+- TS-modified-only filter → enhance src/code-engine.js TypeScript checking
+- AnimAItion content checks → AGENTS.md content_checks YAML
+
+JS-path code-engine.js + scenario-runner.js already have verification infrastructure. Verify-agent best bits become enhancements, not replacements.
+
+## Block B File 8: src/builder-agent.ts (515 lines, 19 KB)
+
+**Purpose:** Execute plan steps via Opus 4.6. Auto-correct paths/actions BEFORE LLM call. Infer related files for context. Apply changes with backups. Run TSC check, loop up to 2 fix attempts if errors. Execute shell commands in same response.
+
+**Earlier Block A dismissal was wrong.** spec-executor.js does NOT cover builder-agent's full capability set. Direct comparison shows builder-agent has features the JS path lacks:
+
+| Feature | builder-agent.ts | spec-executor.js + .md |
+|---------|-----------------|------------------------|
+| Model | Opus 4.6 | Sonnet 4.5 |
+| Path auto-correction | autoCorrectStep BEFORE LLM call | Trusts spec.filePath |
+| Related-files inference | Pattern-based + description keywords | Import-based from current file |
+| Shell command execution | Built into single LLM response | Separate concern |
+| TSC fix loop | Up to 2 retries with error-specific re-prompt | External (Ralph Loop) |
+| File backups | .sneebly/backups/builder/ timestamped | code-engine.js backups |
+| Effort escalation | medium then high if first attempt fails | dispatcher 5-strategy parsing |
+| Multi-file output | fileChanges array | multi-change / multi-create |
+
+**Key mechanisms worth extracting:**
+
+1. autoCorrectStep function:
+   - create-but-exists → modify (RUNTIME state check)
+   - modify-but-missing → create
+   - Schema work targeting wrong file → redirect to shared/schema.ts
+   - Route work targeting index.ts → redirect to routes.ts
+   - Storage work targeting db.ts → redirect to storage.ts
+   - LLM is TOLD what got auto-corrected (meta-context)
+
+2. inferRelatedFiles function:
+   - Path patterns: routes.ts → schema.ts + storage.ts, etc.
+   - Description keywords: "auth"/"clerk"/"user" → schema.ts + routes.ts
+   - File existence verification before inclusion
+   - Capped at 6 files
+
+3. TSC fix loop (MAX_FIX_ATTEMPTS=2):
+   - quickTscCheck runs after every change
+   - If errors → buildFixPrompt with specific errors
+   - Re-prompt with effort=medium then effort=high
+   - "Continuing with best effort" if still failing after 2 attempts
+
+4. Shell commands in same LLM response:
+   - fileChanges + shellCommands in one JSON
+   - Allowed commands: drizzle-kit, tsc, npm scripts, file utils, git read-only
+   - "Do NOT chain with && or ;" rule
+   - required: true means failure fails the whole step
+
+**For v3:** Don't port as a file. Enhance spec-executor.js with these specific functions:
+- autoCorrectStep → pre-LLM path/action correction with runtime checks
+- inferRelatedFiles → enhance _gatherRelatedContext with description-keyword patterns
+- TSC fix loop → within spec-executor OR separate fix-loop module
+- "auto-corrections applied" prompt addendum
+
+The 6 AnimAItion conventions in Opus prompt STILL extract to AGENTS.md path_rules. The functions need to be CODE.
+
+## Block B File 9: src/claude-session.ts (206 lines, 6.48 KB)
+
+**Purpose:** Multi-turn conversation sessions with Claude. Persistent sessions saved to .sneebly/sessions/<id>.json. Provides chat() for multi-turn, oneShot() for single calls.
+
+**Critical capability the JS path LACKS: multi-turn persistent sessions.**
+
+Workflow:
+- createSession(purpose, systemPrompt?) → unique ID, system prompt baked in
+- Each chat() call adds user message, sends history (last 20 messages), gets response
+- 20-message sliding window for API requests, but FULL history preserved in session JSON
+- Sessions persist across process restarts
+- Error handling: failed user messages popped from session (preserves integrity)
+
+**oneShot()** mirrors callClaude from utils.ts. Probable duplication.
+
+**Multi-turn enables patterns JS path can't do:**
+- Deliberation: "let me think through this with you"
+- Stateful agent personalities across heartbeats
+- Iterative debugging with continuity
+- Pair programming patterns
+
+**Used by:** self-modify.ts, learning-loop.ts (both use oneShot)
+**Open question:** Who uses chat()? Maybe nobody — capability exists but unused?
+
+**For v3:** PORT to src/claude-session.js. Include both oneShot and chat. ~206 lines.
+
+## Block B File 10: src/skill-manager.ts (355 lines, 10.9 KB)
+
+**Purpose:** Skill PACKAGE manager. Users submit "skills" (markdown + executable specs). AI-vets them for security. Installs approved skills by writing guidance to .sneebly/skills/ AND queuing executable specs.
+
+**MAJOR FINDING: v2.0 had a plugin/marketplace architecture we didn't account for.**
+
+A skill = a package containing:
+- Metadata (name, version, author, riskLevel)
+- Guidance markdown (read by spec-validator at runtime)
+- Executable specs (JSON, queued for execution)
+
+**Five key mechanisms:**
+
+1. parseSkillPackage — handles JSON, markdown+```json, or markdown+```spec formats
+
+2. vetSkill — AI security review via Haiku 4.5:
+   - Security risks (sensitive files, exfiltration)
+   - Malicious instructions
+   - Logic errors
+   - Scope creep
+   - Compatibility with Drizzle/Express/React
+   - Returns: safe boolean, riskScore 0-10, concerns[], recommendations[]
+   - FAILS CLOSED on all error paths (better than fail-open)
+
+3. submitSkill — async vetting workflow:
+   - Parse → register with status "vetting"
+   - Kick off async vet
+   - Return immediately
+   - .then() updates status when vet completes
+
+4. installSkill — actual installation:
+   - Write guidance to .sneebly/skills/<name>.md (this is what spec-validator READS)
+   - Write specs to .sneebly/queue/pending/<specId>.json (these get executed)
+   - Update registry status to "installed"
+
+5. Registry CRUD: getSkills(statusFilter?), getSkill(id), getSkillStats, rejectSkill
+
+**This closes the convention-synthesis loop:**
+1. auto-research synthesizes new conventions from observed successes
+2. Becomes a skill package (JSON or markdown)
+3. submitSkill called → vet pipeline
+4. Approved skill installed → guidance file in .sneebly/skills/
+5. spec-validator reads .sneebly/skills/*.md at runtime, applies rules
+6. Future specs benefit from new convention
+
+**Inconsistency:** skill-manager uses raw Anthropic client (Replit env vars) instead of importing from anthropic-client.ts. Older file not refactored.
+
+**For v3:** PORT to src/skill-manager.js. Major capability. ~355 lines.
+- Unify on centralized anthropic-client
+- Could upgrade vet model from Haiku to Sonnet/Opus on Claude Max (better security review)
+- AI-vetting pattern preserved (valuable even when calls are free)
+
+## Block B status: 10 files read, 8 unread remaining
+
+**Files read in Block B (10):**
+1. utils.ts
+2. identity.ts
+3. cost-tracker.ts
+4. memory-manager.ts
+5. anthropic-client.ts
+6. verify-agent.ts
+7. builder-agent.ts
+8. claude-session.ts
+9. skill-manager.ts
+
+**Files unread (~8):**
+- autonomy-loop.ts (TS-path orchestrator, BIG, dismissed without reading)
+- progress-tracker.ts, spec-watcher.ts, spec-monitor.ts (spec lifecycle)
+- sneebly-hooks.ts, sync-from-github.ts, auto-db-push.ts (unknown capabilities)
+- command-center.ts, logging.ts (admin/observability)
+- path-safety.ts, shell-executor.ts (TS-path security primitives)
+
+## Updated v3.0 Port List (post-Block B-partial)
+
+Block A said 6 files. After 10 Block B files, the v3.0 list has grown to 13 files + selective enhancements:
+
+**Feature layer (6 files from Block A):**
+1. self-modify.ts → src/self-modify.js
+2. auto-fixer.ts → src/auto-fixer.js
+3. needs-detector.ts → src/needs-detector.js
+4. learning-loop.ts → src/learning-loop.js
+5. spec-validator.ts → src/spec-validator.js
+6. acceptance-test-generator.ts → src/acceptance-test-generator.js
+
+**Infrastructure layer (6 files from Block B):**
+7. utils.ts → src/utils.js (budget → rate-limit)
+8. identity.ts → src/identity.js (THE config parser)
+9. cost-tracker.ts → src/usage-tracker.js (transform: drop dollars)
+10. memory-manager.ts → src/memory-manager.js (add pruning)
+11. anthropic-client.ts (minor env var change, 5 lines)
+12. claude-session.ts → src/claude-session.js (multi-turn capability)
+
+**Extension/plugin layer (1 file from Block B):**
+13. skill-manager.ts → src/skill-manager.js (plugin/marketplace architecture)
+
+**Selective enhancements to existing JS files:**
+- stripStringsAndComments from verify-agent.ts → src/utils.js
+- checkFileSyntax from verify-agent.ts → src/code-engine.js
+- TS-modified-only filter from verify-agent.ts → src/code-engine.js
+- autoCorrectStep from builder-agent.ts → src/subagents/spec-executor.js
+- inferRelatedFiles from builder-agent.ts → src/subagents/spec-executor.js
+- TSC fix loop pattern from builder-agent.ts → spec-executor.js or new module
+
+**v3.0 estimate: 13 files (~3,500-4,000 lines TS → JS) + enhancements. ~4-5 weeks of port work.**
+
+That's 50-80% larger than Block A's estimate.
+
+## Cross-cutting findings from Block B
+
+### Finding 1: The .sneebly/ directory IS Sneebly's memory
+
+Persistent state architecture is substantial:
+- .sneebly/sessions/*.json (multi-turn conversations)
+- .sneebly/skills/*.md (learned conventions)
+- .sneebly/skills-registry.json (skill installation registry)
+- .sneebly/memory.md (categorized wisdom)
+- .sneebly/experiments.jsonl (A/B results)
+- .sneebly/research-log.json (convention synthesis history)
+- .sneebly/ground-truth.json (DB + file snapshot)
+- .sneebly/current-plan.json (active plan state)
+- .sneebly/queue/pending/ and approved/ (spec queues)
+- .sneebly/backups/ (file backups)
+
+v3 must preserve this state architecture.
+
+### Finding 2: Replit coupling is mostly in env vars, not code
+
+anthropic-client.ts: 5 lines of Replit env var assumption
+skill-manager.ts: raw client setup with Replit env vars (inconsistent)
+Most other files: project-agnostic logic
+
+v3 transition is mostly env var renaming + baseURL removal. The hard part is feature porting, not Replit-decoupling.
+
+### Finding 3: Cost discipline simplifies on Claude Max
+
+Every file has cost-aware logic that becomes vestigial on Max:
+- checkBudgetOrThrow (utils.ts) → remove or rate-limit
+- MODEL_PRICING table (cost-tracker.ts) → drop
+- Haiku usage for cheap tasks (skill-manager vet, auto-research) → consider Sonnet/Opus
+- maxTokens caps everywhere → can relax
+
+This isn't just simplification — it's a quality improvement opportunity. v3.0 should use better models for vetting, synthesis, and analysis since cost no longer constrains.
+
+### Finding 4: AI-vetting pattern emerging as v3 design principle
+
+skill-manager.ts vets user-submitted skills via Claude. The pattern:
+- Don't trust input (even from self)
+- AI review with security-focused prompt
+- Fail closed if review unavailable
+- Risk-scored output
+- Human-review recommendations
+
+This pattern should generalize in v3 to: AGENTS.md changes, new skill installations, experiment-runner hypotheses, anything that modifies system behavior.
+
+## What Block B has REVEALED but not yet incorporated
+
+- Plugin/marketplace architecture for user-submitted skills
+- Multi-turn persistent sessions
+- Async pipelines (skill vetting, learning-loop)
+- AI-vetting as security pattern
+- Auto-correction with runtime state checks
+- 6-markdown-config-file architecture
+- TSC-modified-only filtering wisdom
+
+These should make their way into ROADMAP.md when we update Week 1 scope.
