@@ -33,33 +33,48 @@ Target user experience: paste a "start cycle" prompt, walk away, return in an ho
 
 ---
 
-## Current state (as of 2026-05-17 start of day)
+## Current state (as of 2026-05-17 end of day 3)
 
 **Repos and branches:**
 - `github.com/jhmac/sneebly` main — v2.0 standalone (Feb 2026, last commit `5c559e4`)
 - `github.com/jhmac/sneebly` embedded-snapshot — embedded Sneebly from AnimAItion (orphan branch, commit `438aa30`)
-- `github.com/jhmac/sneebly` v3 — design foundation and analysis (current working branch, HEAD `1054831`)
+- `github.com/jhmac/sneebly` v3 — current working branch, HEAD `7667f69` (15 commits ahead of main)
 
 **v3 branch contents:**
-- `docs/ROADMAP.md` — 5-week plan, current canonical
+- `docs/ROADMAP.md` — 5-week plan (NEEDS UPDATE: realistic is now 5-7 weeks after Block B findings)
 - `docs/SLICE-CYCLE.md` — vertical-slice workflow doc
-- `docs/V2_analysis.md` — 884-line per-file analysis of 15 v2.0 src files
+- `docs/V2_analysis.md` — comprehensive per-file analysis of ~41 v2.0 files (grew during Block A+B)
 - `docs/V2_findings.md` — 560-line cross-file synthesis with v3 implications
 - `docs/sneebly-sessions/2026-05-15-spec-md-deep-dive.md` — SPEC.md session note
+- `docs/sneebly-sessions/2026-05-17-block-a-self-modification-outcome.md` — Block A outcome
 - `docs/SESSION-LOG.md` — this file
+- `src/anthropic-client.js` — FIRST V3 PORT (5 lines, tested end-to-end with Claude API)
+- `src/identity.js` — SECOND V3 PORT (189 lines, project config parser)
+- `.env` — local credentials, gitignored
 - `.sneebly/error-ledger.md` — template (superseded by v2.0's regression-tracker concept)
-- `.sneebly/pending-observations.md` — 6 lessons from May 15 Auto Mode trial (also superseded)
+- `.sneebly/pending-observations.md` — 6 lessons from May 15 Auto Mode trial (superseded)
 
-**Architecture findings to date:**
-- v2.0 has ~70% of what v3 needs; v3 is refactor + extension, not rebuild
-- Dual codebase finding: v2.0 has parallel JS path (orchestrator → Ralph Loop → spec-executor) AND TS path (autonomy-loop → planner-agent → builder-agent). JS path is likely canonical; TS path possibly dead. Decision pending.
+**Architecture findings (resolved):**
+- v2.0 had MORE than 70% of what v3 needs (initial estimate was an undercount)
+- Dual codebase RESOLVED: TS path is real production code, not dead. Both paths have complementary capabilities.
 - ELON's build mode IS the "build an app from GOALS.md" capability
-- Yesterday's error-ledger design is superseded by regression-tracker.js (already in v2.0)
+- Self-modification system (17 files) is real and working; v3.0 ports 6 features + extracts patterns from 4 more
+- The 6-markdown-file config architecture (SOUL/IDENTITY/AGENTS/TOOLS/HEARTBEAT/USER) IS the v3 surface
+- The .sneebly/ directory IS Sneebly's persistent memory across restarts (10+ state files)
+- Two-pass build model (per-step + per-plan Opus review) is autonomy-loop.ts's real innovation
+- AI-vetting pattern (skill-manager) generalizes to v3 plugin architecture
+- v3 cost reframe (Mac mini + Claude Max) eliminates Replit-proxied per-token pricing
+
+**Final v3.0 port plan (committed in 22cb882):**
+- 20 ported files + 2 new files + selective enhancements to 3 existing JS files
+- Estimated ~4,500-5,500 lines TS to JS work
+- Realistic timeline: 5-7 weeks of focused porting
+- 2 ports complete (anthropic-client, identity); 18 remaining
 
 **Plumb state:**
-- All May 15 commits pushed (test file, gitignore, session note already at origin/main, HEAD `7567db2`)
-- Local environment has known broken state (drizzle-kit esbuild mismatch never resolved — will need SETUP.md when Plumb stress-test time comes)
-- Plumb is NOT the current focus — addressed via planned "Sneebly first, Plumb later" decision
+- Plumb is NOT the current focus — Sneebly v3 must be built first
+- Plumb will be the stress test once v3.0 is runnable (probably week 6-7)
+- Plumb local environment has known broken state (will need SETUP.md when stress-test time comes)
 
 ---
 
@@ -223,6 +238,81 @@ These shaped the v3 roadmap and should not be revisited casually:
 - 3 modernizations for Opus 4.7: dispatcher MODEL_MAP, token-based cost tracking, prompt caching
 
 **End-of-day v3 branch state:** 9 commits ahead of main, all pushed to origin.
+
+---
+
+
+### 2026-05-17 (Day 3)
+
+**Block A — Self-modification investigation (morning):**
+- Read 7 v2.0 files in jhmac/sneebly embedded-snapshot branch that exist nowhere else: rollback.ts, roadmap-orchestrator.ts, experiment-runner.ts, auto-research.ts, experiment-metrics.ts, acceptance-test-generator.ts, ground-truth-builder.ts, knowledge-base.ts
+- Plus 6 TS files in jhmac/sneebly main: learning-loop.ts, self-modify.ts, auto-fixer.ts, needs-detector.ts, planner-agent.ts, spec-validator.ts
+- Outcome: all 17 self-modification files are real production code, not aspirational scaffolding. Block 4 dismissal of "TS path is dead code" was wrong.
+- Three-tier port plan committed (13ac95d):
+  - v3.0 port (5 files): auto-fixer, needs-detector, learning-loop, self-modify, acceptance-test-generator, spec-validator
+  - v3.1 port (4 files): experiment-runner+metrics, auto-research+knowledge-base
+  - Don't port: planner-agent (duplicates ELON), builder-agent (extract patterns), rollback (JS path has it), roadmap-orchestrator (duplicates), ground-truth-builder (Postgres-coupled)
+
+**Strategic reframe (mid-morning):**
+User clarified the v3 goal: take Sneebly out of Replit (where v2.0 was expensive due to Replit-proxied per-token API costs) onto Mac mini using Claude Max flat-rate subscription. v3 checks in every 1-2 hours, builds apps semi-autonomously.
+
+This reframe affected every subsequent port decision:
+- cost-tracker becomes usage-tracker (drop dollars, keep telemetry)
+- Budget checks become rate-limit checks
+- Opus 4.7 default-on (was opt-in)
+- Replit env vars to standard ANTHROPIC_API_KEY
+- Cache-control retained for latency benefit even though free
+
+**Block B — V2 feature coverage investigation (afternoon, ~9 hours):**
+Read remaining 20 unread TS files in jhmac/sneebly main to ensure v3 design doesn't miss capabilities. Files analyzed at full depth:
+- utils.ts (95) — callClaude wrapper, cache_control ephemeral
+- identity.ts (156) — THE configuration parser, 6 canonical .md files
+- cost-tracker.ts (349) — usage ledger to transform for v3
+- memory-manager.ts (134) — markdown sections substrate
+- anthropic-client.ts (6) — SDK init, smoking gun for Replit coupling
+- verify-agent.ts (355) — 6 verification mechanisms incl. stripStringsAndComments
+- builder-agent.ts (515) — autoCorrectStep + inferRelatedFiles + TSC fix loop (Block A dismissal wrong)
+- claude-session.ts (206) — multi-turn persistent sessions (JS path LACKS)
+- skill-manager.ts (355) — plugin marketplace with AI-vetted installation
+- autonomy-loop.ts (672) — full autonomous orchestrator with Opus plan-completion review (Block A dismissal wrong)
+- shell-executor.ts (263) — 3-layer security with 25+ blocklist patterns
+- progress-tracker.ts (242) — reconciles GOALS.md vs actual codebase
+- spec-watcher.ts (109) — polls .sneebly/blocked|failed|failed-queue
+- spec-monitor.ts (387) — blocker management, 6 failure categories, wrong-path auto-resolution
+- sneebly-hooks.ts (212) — MD changelog stamping + human testing alerts
+- sync-from-github.ts (102) — Replit one-off script, OBSOLETE for v3
+- auto-db-push.ts (83) — fs.watch on schema.ts, AnimAItion-coupled
+- command-center.ts (1226) — admin dashboard HTML/CSS/JS template
+- logging.ts (124) — Express middleware with secret sanitization
+- path-safety.ts (44) — foundation primitive every safety call goes through
+
+**Key Block B findings:**
+- The 6-markdown-file architecture (SOUL/IDENTITY/AGENTS/TOOLS/HEARTBEAT/USER, plus GOALS/SPEC_ROADMAP) IS the v3 configuration surface
+- The .sneebly/ directory has 10+ files for persistent state (sessions, skills, registry, memory, journals, etc.)
+- Two-pass build model (per-step + per-plan Opus review) is the real innovation of autonomy-loop.ts
+- AI-vetting pattern (skill-manager) generalizes to any user-submitted content in v3
+- Block A's "6 files port" was a 3x undercount. Final v3.0 list: 20 ported files + 2 new + enhancements
+
+**Block B commits:**
+- 11a90fd: 6 infrastructure files analyzed (utils, identity, cost-tracker, memory-manager, anthropic-client, verify-agent)
+- 981fa8b: 4 more files (verify-agent, builder-agent, claude-session, skill-manager)
+- 20fd6ca: autonomy-loop + shell-executor
+- 22cb882: Final 9 files + Block B complete
+
+**FIRST PORTS BEGUN (late evening):**
+- 36f966c: src/anthropic-client.js — 5-line CommonJS port with standard env var + no baseURL. Tested end-to-end with real Claude API call (Sonnet 4.5, returned "Hello, how are you today?", 16 input + 10 output tokens). dotenv installed.
+- 7667f69: src/identity.js — 189-line port. v3 changes: getBudgetLimits returns request-rate (was dollars), Opus default-on (was opt-in), HEARTBEAT.md uses "Max requests per heartbeat" key with v2.0 fallback. Tested with: (a) empty environment returns defaults, (b) full identity files parse correctly (4 safe paths, 4 never-modify, 3 standards, 4 commands, HTML comments stripped, SOUL+IDENTITY concatenated).
+
+**End-of-day v3 branch state:** 15 commits ahead of main (was 9). All pushed to origin.
+
+**Key learnings:**
+- Block A and Block B both revealed that "dismissed without reading" claims were wrong. Pattern: read before dismissing.
+- The investigation phase saved Week 1 work from missing 70% of v2.0 capability. Block A's initial 6-file port would have shipped without claude-session multi-turn, skill-manager plugin marketplace, autonomy-loop two-pass review, spec-monitor wrong-path auto-resolution, and ~10 other critical features.
+- Realistic v3.0 timeline: 5-7 weeks port work (was estimated 2-3 weeks). Tradeoff worth it given Claude Max eliminates per-token costs.
+- Mac mini + Claude Max architecture is genuinely simpler than v2.0's Replit-proxied path. Most of v2.0's cost discipline becomes vestigial.
+
+**Files to read tomorrow (start of Week 1 extraction):**
+- None — investigation complete. Next session is porting work.
 
 ---
 
