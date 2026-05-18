@@ -1055,3 +1055,206 @@ Three files plus one discovery:
 
 This analysis informed the Block 4 decision (committed as 4ce3b1c and revised in eede1f3).
 
+
+---
+
+## Block B — V2 Feature Coverage Investigation (2026-05-17 morning, full-day continuation)
+
+Goal: Read remaining v2.0 files to ensure v3 design doesn't miss existing features or hidden dependencies. Triggered by user reframe: v3 must take advantage of Claude Max flat-rate pricing (vs v2.0's Replit-proxied per-token costs).
+
+## Block B File 1: src/utils.ts (95 lines, 2.61 KB)
+
+**Purpose:** The central Anthropic API client wrapper used by every TS-path file. Three functions: callClaude (universal LLM call), extractJson (defensive JSON parser), checkBudgetOrThrow (cost circuit breaker).
+
+**Key mechanisms:**
+- callClaude with cache_control ephemeral on system prompts (10x cheaper cached input + latency benefit)
+- Default model is Sonnet 4.5
+- Observability metadata: agent/task/feature/context fields used by cost-tracker
+- buildSystemPrompt comes from identity.ts (every call shares a base system prompt)
+- extractJson does brace-counting walk to handle LLM output wrapped in prose
+
+**For v3 on Claude Max:**
+- checkBudgetOrThrow becomes rate-limit check (or removed)
+- logCost becomes request log (observability not billing)
+- Cache control preserved for latency (still valuable on Max)
+- Default model should become Opus 4.7
+
+**Port verdict:** Port to src/utils.js for v3.0. Adapt budget check to rate limiting. Critical infrastructure.
+
+## Block B File 2: src/identity.ts (156 lines, 4.33 KB)
+
+**Purpose:** Parses 6 project markdown files into structured configuration. Each Sneebly project has its own SOUL.md/AGENTS.md/IDENTITY.md/TOOLS.md/HEARTBEAT.md/USER.md. identity.ts is the parser.
+
+**The 6-markdown-file convention (CRITICAL ARCHITECTURE FINDING):**
+- SOUL.md — Sneebly's universal character/mission (system prompt)
+- AGENTS.md — Per-project: Safe Paths, NEVER Auto-Modify, Coding Standards, model restrictions
+- IDENTITY.md — Per-project agent name/tagline (system prompt)
+- TOOLS.md — Allowed shell commands
+- HEARTBEAT.md — Budget limits per heartbeat
+- USER.md — Info about human user (read but not parsed structurally)
+
+**Key mechanisms:**
+- parseListSection (markdown bullet list parser) for AGENTS.md sections
+- parseNumberValue for HEARTBEAT.md budget parsing
+- buildSystemPrompt concatenates SOUL.md + IDENTITY.md (strips HTML comments)
+- 60-second cache on cachedIdentity and cachedConfig
+- costLimitPerModel: opus opt-in unless explicitly configured (v2.0 cost guard)
+
+**For v3 on Claude Max:**
+- Budget limits become throughput limits (requests per heartbeat)
+- Opus opt-in is inverted: Opus 4.7 becomes default
+- AGENTS.md gains path_rules section (declarative rules extracted from spec-validator + planner-agent + builder-agent)
+- 6-file convention PRESERVED — this is the v3 architecture
+
+**Port verdict:** PORT TO src/identity.js for v3.0. THE configuration infrastructure. Without it, no other ported file works (they all use getSafePaths/getNeverModifyPaths/buildSystemPrompt).
+
+## Block B File 3: src/cost-tracker.ts (349 lines, 11.1 KB)
+
+**Purpose:** Cost ledger tracking every Claude API call. Calculates dollar cost from token counts, aggregates by agent/model/task/feature, supports sessions, prunes old entries at 2000 limit.
+
+**Key mechanisms:**
+- Hardcoded MODEL_PRICING table (opus-4-6, sonnet-4-6, haiku-4-5; cache rates 10x cheaper)
+- logCost per-call entry with rich observability metadata
+- getCostSummary returns byModel/byAgent/byTask/byFeature breakdowns
+- Sessions: startSession/endSession bracket logical work units
+- syncFromSneeblyLogs migrates legacy markdown logs
+- recalculateAllCosts re-computes from tokens if pricing changes
+
+**For v3 on Claude Max — TRANSFORM not direct port:**
+- Drop MODEL_PRICING table (irrelevant)
+- Drop dollar logic (calculateCost, byModel.cost → byModel.requestCount)
+- Drop syncFromSneeblyLogs (no legacy dollars to migrate)
+- Drop recalculateAllCosts (pricing doesn't change)
+- KEEP per-call telemetry, agent attribution, session bracketing, byTask aggregation
+- ADD latency tracking (p50/p95/p99), failure rate per call, rate-limit proximity
+
+**Renamed for v3:** src/usage-tracker.js (not cost-tracker).
+
+**Port verdict:** ~150 lines stay, ~100 lines removed, ~100 lines added. Real port + transform.
+
+## Block B File 4: src/memory-manager.ts (134 lines, 4.12 KB)
+
+**Purpose:** Markdown-based knowledge store. Reads/writes/updates sections of .sneebly/memory.md with atomic writes. Substrate for the "Sneebly learns" pattern.
+
+**Key mechanisms:**
+- atomicWrite via tmp-file-then-rename (concurrent-safe)
+- Default sections: Conventions, Mistakes, Fix Patterns, Progress
+- appendToSection with built-in dedup (skips if entry already present)
+- updateSection replaces section content entirely
+- Helper aliases: addConvention, addFixPattern, addBuildPattern, addMistake
+- getMemoryForPrompt returns full memory OR filtered subset (injected into LLM prompts)
+- updateTimestamp adds/updates "Last updated: YYYY-MM-DD" near top
+
+**Comparison to JS-path's memory.js:**
+- memory-manager.ts: categorized sections (Conventions/Mistakes/Fix Patterns)
+- memory.js: chronological journal
+- Both valuable: categorical for wisdom lookup, chronological for recent recall
+
+**Concerns:**
+- NO pruning — memory.md grows forever (becomes expensive in prompts)
+- For v3: add hard cap per section (last 50 entries) or age-based pruning
+
+**Port verdict:** PORT TO src/memory-manager.js for v3.0. Add pruning during port.
+
+## Block B File 5: src/anthropic-client.ts (6 lines code, 219 bytes)
+
+**Purpose:** SDK initialization. Creates Anthropic client from environment variables.
+
+**The whole file:**
+```typescript
+const client = new Anthropic({
+  apiKey: process.env.AI_INTEGRATIONS_ANTHROPIC_API_KEY,
+  baseURL: process.env.AI_INTEGRATIONS_ANTHROPIC_BASE_URL,
+});
+```
+
+**CRITICAL FINDING — Smoking gun for Replit coupling:**
+The AI_INTEGRATIONS_* env vars are Replit's AI Integrations feature. v2.0 routed API calls through Replit's proxy (with their billing markup). This is WHY v2.0 was "incredibly expensive to run" — every call went through Replit's pricing layer.
+
+**For v3 on Claude Max:**
+- Use standard ANTHROPIC_API_KEY env var
+- No baseURL (defaults to api.anthropic.com)
+- Direct connection, flat-rate Claude Max subscription
+- Trivial 2-line transformation
+
+**Port verdict:** ~5 lines change. The Replit proxy is what made v2.0 expensive. v3 eliminates this entirely.
+
+## Block B File 6: src/verify-agent.ts (355 lines, 10.8 KB)
+
+**Purpose:** Post-modification verification suite. Six check types: server health, file existence, file content, syntax balance, TypeScript compilation, browser smoke test.
+
+**Six mechanisms:**
+1. checkServerHealth — httpGet /health, expect 200
+2. checkApiEndpoint — 200 or 401/403 (auth-protected also passes)
+3. checkFileExists — fs.existsSync
+4. checkFileContains — file content includes expected string
+5. checkFileSyntax — bracket balance after stripStringsAndComments helper
+6. checkTypeScript — npx tsc --noEmit --pretty false (60s timeout)
+7. browserSmokeCheck — playwright-core headless, console error count, body text check
+
+**Three exported functions:**
+- verifyChanges (full suite, used after each plan step) — heavy
+- quickStepVerify (file + syntax + tsc) — medium, between steps
+- quickHealthCheck (just /health ping) — fastest, used by self-modify
+
+**CRITICAL FINDINGS:**
+
+1. stripStringsAndComments is a reusable poor-man's-lexer (~50 lines). Handles line comments, block comments, template literals with nested ${}, single/double quotes with \ escapes. Extract as v3 shared utility.
+
+2. TS-modified-files-only filter: tsc output filtered to only show errors in files we just modified. Prevents pre-existing tech debt from blocking new changes. This is hard-won wisdom — v3 must preserve.
+
+3. AnimAItion content checks hardcoded: pgTable, createInsertSchema, IStorage, DatabaseStorage, requireAuth. For v3 these become AGENTS.md content_checks declarative config.
+
+4. Browser smoke check fails-with-skip if Playwright unavailable: defensive against agent environment.
+
+**For v3:** Selective extraction, NOT full port:
+- stripStringsAndComments → src/utils.js shared util
+- checkFileSyntax pattern → enhance src/code-engine.js verification
+- TS-modified-only filter → enhance src/code-engine.js TypeScript checking
+- AnimAItion content checks → AGENTS.md content_checks YAML
+
+JS-path code-engine.js + scenario-runner.js already have verification infrastructure. Verify-agent's best ideas become enhancements not replacements.
+
+## Block B summary so far (6 files read)
+
+**Pattern across all 6 files:** Every file is real production code with hard-won wisdom. The Claude Max reframe consistently simplifies (drop budget, drop pricing, drop Replit proxy). The 6-markdown-config-files pattern emerges as the core v3 architecture.
+
+## Updated v3.0 Port List (post Block B)
+
+Block A said 6 files (~2,100 lines). Block B has revealed infrastructure dependencies:
+
+**Feature layer (6 files from Block A — unchanged):**
+1. self-modify.ts → src/self-modify.js
+2. auto-fixer.ts → src/auto-fixer.js
+3. needs-detector.ts → src/needs-detector.js
+4. learning-loop.ts → src/learning-loop.js
+5. spec-validator.ts → src/spec-validator.js
+6. acceptance-test-generator.ts → src/acceptance-test-generator.js
+
+**Infrastructure layer (5+ files from Block B):**
+7. utils.ts → src/utils.js (budget → rate-limit)
+8. identity.ts → src/identity.js (THE config parser, must port)
+9. cost-tracker.ts → src/usage-tracker.js (transform: drop dollars, keep observability)
+10. memory-manager.ts → src/memory-manager.js (add pruning)
+11. anthropic-client.ts → minor env var change (5 lines)
+
+**Selective enhancements to existing JS files:**
+- stripStringsAndComments from verify-agent.ts → src/utils.js shared util
+- checkFileSyntax from verify-agent.ts → src/code-engine.js
+- TS-modified-only filter from verify-agent.ts → src/code-engine.js
+
+**Updated v3.0 estimate:** 11 files (~3,200 lines TS → JS) + selective enhancements. ~50% bigger than Block A's estimate.
+
+## What's still pending in Block B
+
+Files not yet read (~12-15 remaining):
+- claude-session.ts — oneShot vs callClaude distinction
+- skill-manager.ts — manages .sneebly/skills/*.md (the convention surface)
+- builder-agent.ts — we dismissed without reading, needs verification
+- autonomy-loop.ts — TS-path orchestrator, dismissed
+- progress-tracker.ts, spec-watcher.ts, spec-monitor.ts (spec lifecycle)
+- sneebly-hooks.ts, sync-from-github.ts, auto-db-push.ts (capabilities possibly missed)
+- command-center.ts, logging.ts (admin/observability)
+- path-safety.ts, shell-executor.ts (TS-path security primitives)
+
+**Reading approach:** Continue triaged reading. Highest priority: builder-agent.ts (verify Block A dismissal claim), skill-manager.ts (convention surface), claude-session.ts (API call layer completion).
